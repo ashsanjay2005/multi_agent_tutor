@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Button } from './components/ui/button';
 import { Textarea } from './components/ui/textarea';
@@ -7,12 +7,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { LoadingView } from './components/LoadingView';
 import { DisambiguationView } from './components/DisambiguationView';
 import { SolutionView } from './components/SolutionView';
-import { Camera, FileText } from 'lucide-react';
-import { analyzeProblem, resumeWorkflow, APIError } from './lib/api';
-import { captureScreenshot, getUserId } from './lib/utils';
-import type { AnalyzeResponse, InputType } from './lib/types';
+import { PracticeView } from './components/PracticeView';
+import { Upload, FileText, ImageIcon, X } from 'lucide-react';
+import { analyzeProblem, resumeWorkflow, generatePractice, APIError } from './lib/api';
+import { getUserId } from './lib/utils';
+import type { AnalyzeResponse, InputType, PracticeQuestion } from './lib/types';
 
-type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'error';
+type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'error';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'paste' | 'screenshot'>('paste');
@@ -20,6 +21,12 @@ function App() {
   const [textInput, setTextInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [response, setResponse] = useState<AnalyzeResponse | null>(null);
+  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [originalProblem, setOriginalProblem] = useState<string>('');
+  const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
+  const [practiceLoading, setPracticeLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleAnalyze = async (type: InputType, content: string) => {
     if (!content.trim()) {
@@ -32,6 +39,7 @@ function App() {
 
     try {
       const userId = getUserId();
+      setOriginalProblem(content); // Store for practice generation
       const result = await analyzeProblem({
         type,
         content,
@@ -67,21 +75,49 @@ function App() {
     handleAnalyze('text', textInput);
   };
 
-  const handleScreenshotCapture = async () => {
-    setState('loading');
-    setError(null);
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
 
-    try {
-      const base64Image = await captureScreenshot();
-      await handleAnalyze('image', base64Image);
-    } catch (err) {
-      setState('error');
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to capture screenshot. Make sure you have the required permissions.'
-      );
-      console.error('Screenshot error:', err);
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      setError('Please select an image file (PNG, JPG, etc.)');
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setError('Image too large. Please use an image under 10MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const base64 = e.target?.result as string;
+      // Remove data URL prefix for API (keep full for preview)
+      setImagePreview(base64);
+      setUploadedImage(base64.split(',')[1]); // Just the base64 part
+      setError(null);
+    };
+    reader.onerror = () => {
+      setError('Failed to read image file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleImageSubmit = async () => {
+    if (!uploadedImage) {
+      setError('Please upload an image first.');
+      return;
+    }
+    await handleAnalyze('image', uploadedImage);
+  };
+
+  const clearImage = () => {
+    setUploadedImage(null);
+    setImagePreview(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
@@ -115,6 +151,32 @@ function App() {
     setTextInput('');
     setError(null);
     setResponse(null);
+    clearImage();
+  };
+
+  const handlePracticeClick = async () => {
+    if (!response?.topic || !originalProblem) return;
+
+    setPracticeLoading(true);
+    try {
+      const result = await generatePractice({
+        topic: response.topic,
+        original_problem: originalProblem,
+        num_questions: 3
+      });
+      setPracticeQuestions(result.questions);
+      setState('practice');
+    } catch (err) {
+      console.error('Practice generation error:', err);
+      setError('Failed to generate practice problems. Please try again.');
+    } finally {
+      setPracticeLoading(false);
+    }
+  };
+
+  const handleBackFromPractice = () => {
+    setState('solution');
+    setPracticeQuestions([]);
   };
 
   // Render current view based on state
@@ -132,6 +194,16 @@ function App() {
       );
     }
 
+    if (state === 'practice' && practiceQuestions.length > 0) {
+      return (
+        <PracticeView
+          topic={response?.topic || ''}
+          questions={practiceQuestions}
+          onBack={handleBackFromPractice}
+        />
+      );
+    }
+
     if (state === 'solution' && (response?.final_response_html || response?.solution_steps)) {
       return (
         <SolutionView
@@ -139,6 +211,9 @@ function App() {
           topic={response.topic}
           solutionSteps={response.solution_steps}
           finalAnswer={response.final_answer}
+          originalProblem={originalProblem}
+          onPracticeClick={handlePracticeClick}
+          practiceLoading={practiceLoading}
         />
       );
     }
@@ -167,8 +242,8 @@ function App() {
             Paste Text
           </TabsTrigger>
           <TabsTrigger value="screenshot">
-            <Camera className="h-4 w-4 mr-2" />
-            Screenshot
+            <Upload className="h-4 w-4 mr-2" />
+            Upload Image
           </TabsTrigger>
         </TabsList>
 
@@ -202,22 +277,62 @@ function App() {
         <TabsContent value="screenshot" className="space-y-4">
           <Card className="border-0 shadow-none">
             <CardHeader>
-              <CardTitle className="text-lg">Capture Screenshot</CardTitle>
+              <CardTitle className="text-lg">Upload Image</CardTitle>
               <CardDescription>
-                Click the button below to capture the current tab and analyze any math problems visible on screen.
+                Upload a screenshot or photo of your STEM problem.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-muted rounded-lg">
-                <Camera className="h-12 w-12 text-muted-foreground mb-4" />
-                <p className="text-sm text-muted-foreground text-center mb-4">
-                  Make sure the math problem is visible in the current tab before capturing.
-                </p>
-                <Button onClick={handleScreenshotCapture} size="lg">
-                  <Camera className="h-4 w-4 mr-2" />
-                  Capture & Solve
-                </Button>
-              </div>
+              {/* Hidden file input */}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileSelect}
+                accept="image/*"
+                className="hidden"
+              />
+
+              {/* Upload zone or preview */}
+              {imagePreview ? (
+                <div className="relative">
+                  <img
+                    src={imagePreview}
+                    alt="Uploaded problem"
+                    className="w-full rounded-lg border border-muted max-h-48 object-contain bg-slate-900"
+                  />
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    className="absolute top-2 right-2 h-8 w-8"
+                    onClick={clearImage}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div
+                  className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-muted rounded-lg cursor-pointer hover:border-primary/50 transition-colors"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <ImageIcon className="h-12 w-12 text-muted-foreground mb-4" />
+                  <p className="text-sm text-muted-foreground text-center mb-2">
+                    Click to upload or drag and drop
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    PNG, JPG up to 10MB
+                  </p>
+                </div>
+              )}
+
+              <Button
+                onClick={handleImageSubmit}
+                disabled={!uploadedImage}
+                className="w-full"
+                size="lg"
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                Solve Problem
+              </Button>
             </CardContent>
           </Card>
         </TabsContent>

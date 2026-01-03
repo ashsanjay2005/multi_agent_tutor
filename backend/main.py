@@ -206,6 +206,106 @@ async def explain_step(request: ExplainStepRequest):
         "topic": request.topic
     }
 
+
+# ============================================================================
+# PRACTICE PROBLEMS ENDPOINT
+# ============================================================================
+
+class PracticeRequest(BaseModel):
+    """Request for generating practice problems"""
+    topic: str = Field(..., description="The topic to generate practice problems for")
+    original_problem: str = Field(..., description="The original problem for context")
+    num_questions: int = Field(default=3, ge=1, le=5)
+
+
+class PracticeQuestion(BaseModel):
+    """A single practice question"""
+    question: str
+    options: list[str]  # 4 multiple choice options
+    correct_index: int  # 0-3 index of correct answer
+    explanation: str
+
+
+class PracticeResponse(BaseModel):
+    """Response with practice problems"""
+    topic: str
+    questions: list[PracticeQuestion]
+
+
+@app.post("/v1/practice", response_model=PracticeResponse)
+async def generate_practice(request: PracticeRequest):
+    """Generate practice problems on-demand (only when user clicks the button)."""
+    logger.info(f"[Practice] Generating {request.num_questions} questions for: {request.topic}")
+    
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.messages import HumanMessage
+    import json
+    import re
+    
+    llm = ChatGoogleGenerativeAI(
+        model=settings.text_model,
+        google_api_key=settings.google_api_key,
+        temperature=0.7  # Slight variation for diverse questions
+    )
+    
+    try:
+        prompt = f"""Generate {request.num_questions} multiple choice practice questions on the topic: {request.topic}
+
+Original problem for context: {request.original_problem}
+
+Create questions that test the same concept but with different numbers/scenarios.
+Each question should have 4 options (A, B, C, D) with only one correct answer.
+
+Respond in this EXACT JSON format:
+{{
+  "questions": [
+    {{
+      "question": "The question text with math in LaTeX like $x^2$",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correct_index": 0,
+      "explanation": "Brief explanation of why this is correct"
+    }}
+  ]
+}}
+
+Make the questions progressively harder. Use LaTeX for math expressions."""
+
+        result = await llm.ainvoke([HumanMessage(content=prompt)])
+        response_text = result.content
+        
+        # Parse JSON from response
+        json_match = re.search(r'\{[\s\S]*"questions"[\s\S]*\}', response_text)
+        if json_match:
+            data = json.loads(json_match.group())
+        else:
+            raise ValueError("Could not parse questions JSON")
+        
+        questions = [
+            PracticeQuestion(
+                question=q["question"],
+                options=q["options"],
+                correct_index=q["correct_index"],
+                explanation=q["explanation"]
+            )
+            for q in data["questions"]
+        ]
+        
+        logger.info(f"[Practice] Generated {len(questions)} questions")
+        
+        return PracticeResponse(
+            topic=request.topic,
+            questions=questions
+        )
+        
+    except Exception as e:
+        logger.error(f"[Practice] Error: {e}", exc_info=True)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Failed to generate practice problems: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=settings.backend_port, reload=True)
+

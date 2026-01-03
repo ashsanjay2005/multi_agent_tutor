@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { ChevronDown, ChevronUp, CheckCircle2, Copy, RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronUp, CheckCircle2, Copy, RotateCcw, GraduationCap, Loader2 } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
@@ -17,6 +17,9 @@ interface SolutionViewProps {
   topic?: string | null;
   solutionSteps?: SolutionStep[];
   finalAnswer?: string;
+  originalProblem?: string;
+  onPracticeClick?: () => void;
+  practiceLoading?: boolean;
 }
 
 // Parse text and render inline LaTeX ($...$) and display LaTeX ($$...$$)
@@ -124,7 +127,7 @@ function MathDisplay({ latex }: { latex: string }) {
   );
 }
 
-export function SolutionView({ html, topic, solutionSteps, finalAnswer }: SolutionViewProps) {
+export function SolutionView({ html, topic, solutionSteps, finalAnswer, originalProblem: _originalProblem, onPracticeClick, practiceLoading }: SolutionViewProps) {
   const [expandedStep, setExpandedStep] = useState<number | null>(1);
 
   const toggleStep = (stepNum: number) => {
@@ -217,6 +220,19 @@ export function SolutionView({ html, topic, solutionSteps, finalAnswer }: Soluti
             </CardContent>
           </Card>
         )}
+        {/* Practice Quiz Button */}
+        <Button
+          onClick={onPracticeClick}
+          disabled={practiceLoading || !topic}
+          className="w-full mt-4 bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600"
+          size="lg"
+        >
+          {practiceLoading ? (
+            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating Quiz...</>
+          ) : (
+            <><GraduationCap className="h-4 w-4 mr-2" />Practice Quiz</>
+          )}
+        </Button>
 
         {/* Action Buttons */}
         <div className="flex gap-2 pt-2">

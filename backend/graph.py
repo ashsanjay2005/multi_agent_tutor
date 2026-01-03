@@ -200,20 +200,108 @@ CRITICAL DETECTION RULES:
 
 
 async def vision_classifier_node(state: GraphState) -> GraphState:
-    """Classifies the STEM topic from image input using a multimodal LLM (TODO: Implement)."""
+    """Classifies the STEM topic from image input using Gemini multimodal."""
     print(f"[VisionClassifier] Processing image...")
-    await asyncio.sleep(0.8)  # Mock API call
-    # Mock response: Medium confidence (triggers disambiguation)
+    
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.messages import HumanMessage
+    import json
+    import re
+    
+    llm = ChatGoogleGenerativeAI(
+        model=settings.vision_model,
+        google_api_key=settings.google_api_key,
+        temperature=0
+    )
+    
+    # Retry logic for rate limits
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            image_data = state["input_content"]
+            
+            # SINGLE API CALL: Extract problem AND classify together
+            combined_message = HumanMessage(
+                content=[
+                    {"type": "text", "text": """Analyze this image of a STEM problem.
+
+TASK 1: Extract the exact problem text, equations, or question shown.
+TASK 2: Classify the topic.
+
+Respond in this EXACT JSON format:
+{
+  "extracted_problem": "The problem text you see in the image",
+  "subject": "Math|Physics|Chemistry|Biology|Computer Science",
+  "category": "Linear Algebra|Calculus|Mechanics|Stochastic Processes|etc",
+  "specific_topic": "Cross Product|Derivative|Ornstein-Uhlenbeck Process|etc",
+  "confidence": 1.0
+}
+
+Be specific with the topic. Use confidence 1.0 for clear STEM problems."""},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}}
+                ]
+            )
+            
+            result = await llm.ainvoke([combined_message])
+            response_text = result.content
+            
+            # Parse JSON from response
+            json_match = re.search(r'\{[\s\S]*?\}', response_text)
+            if json_match:
+                data = json.loads(json_match.group())
+            else:
+                raise ValueError(f"Could not parse JSON from: {response_text[:200]}")
+            
+            extracted_text = data.get("extracted_problem", "")
+            subject = data.get("subject", "Math")
+            category = data.get("category", "Unknown")
+            specific_topic = data.get("specific_topic", "Unknown")
+            confidence = float(data.get("confidence", 0.9))
+            
+            full_topic = f"{subject} - {category} - {specific_topic}"
+            
+            print(f"[VisionClassifier] Extracted: {extracted_text[:80]}...")
+            print(f"[VisionClassifier] Classified as: {full_topic} (confidence: {confidence})")
+            
+            return {
+                **state,
+                "input_content": extracted_text,  # Replace image with text for step_solver
+                "topic": full_topic,
+                "confidence_score": confidence,
+                "detected_ambiguity": False,
+                "candidate_topics": []
+            }
+            
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "ResourceExhausted" in error_str or "quota" in error_str.lower():
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    print(f"[VisionClassifier] Rate limited, retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+            
+            print(f"[VisionClassifier] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            return {
+                **state,
+                "topic": None,
+                "confidence_score": 0.3,
+                "detected_ambiguity": True,
+                "candidate_topics": ["API rate limit reached. Please try again in a minute or paste the text instead."]
+            }
+    
+    # Should not reach here
     return {
         **state,
         "topic": None,
-        "confidence_score": 0.55,
-        "detected_ambiguity": True,
-        "candidate_topics": [
-            "Math - Calculus (Derivatives)",
-            "Math - Calculus (Integrals)",
-            "Physics - Kinematics"
-        ]
+        "confidence_score": 0.3,
+        "detected_ambiguity": True, 
+        "candidate_topics": ["Failed after retries. Please paste the text instead."]
     }
 
 
