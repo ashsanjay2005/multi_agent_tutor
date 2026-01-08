@@ -76,6 +76,42 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
     environment: str
 
+# Sub-step expansion models
+class PreviousStepSummary(BaseModel):
+    """Summary of a previous step for context."""
+    label: str
+    title: str
+    summary: str  # 1-line summary
+
+class ExpandStepRequest(BaseModel):
+    """Request to break down a step into sub-steps."""
+    step_id: str = Field(..., description="Unique ID of the step")
+    step_path: str = Field(..., description="Path in tree, e.g., '1', '1.2', '1.2.1'")
+    step_title: str = Field(...)
+    step_explanation: str = Field(...)
+    step_math: Optional[str] = None
+    problem_statement: str = Field(..., description="Original problem text")
+    topic: str = Field(...)
+    current_depth: int = Field(..., ge=0, le=3)
+    previous_steps: Optional[list[PreviousStepSummary]] = None
+
+class SubStep(BaseModel):
+    """A sub-step generated from expanding a parent step."""
+    id: str
+    label: str  # e.g., "1.1", "1.2.1"
+    order: int  # 1, 2, 3... within siblings
+    title: str
+    explanation: str
+    math_expression: Optional[str] = None
+    can_expand: bool = True
+
+class ExpandStepResponse(BaseModel):
+    """Response containing sub-steps or stop indication."""
+    sub_steps: list[SubStep] = []
+    can_expand: bool = True
+    stop_reason: Optional[Literal["atomic", "max_depth", "loop_risk", "insufficient_context"]] = None
+    message: Optional[str] = None
+
 # ============================================================================
 # LIFECYCLE & APP
 # ============================================================================
@@ -269,13 +305,189 @@ async def resume_workflow(request: ResumeRequest):
         logger.error(f"[Resume] Error: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
 
-@app.post("/v1/explain_step")
-async def explain_step(request: ExplainStepRequest):
-    logger.info(f"[ExplainStep] Topic: {request.topic}")
-    return {
-        "explanation": f"Explanation for {request.step_text}...",
-        "topic": request.topic
-    }
+@app.post("/v1/expand_step", response_model=ExpandStepResponse)
+async def expand_step(request: ExpandStepRequest):
+    """
+    Break down a solution step into 2-4 sub-steps.
+    Uses parent step as context, doesn't restate the full problem.
+    """
+    logger.info(f"[ExpandStep] Path: {request.step_path}, Depth: {request.current_depth}")
+    
+    # Check max depth
+    if request.current_depth >= 3:
+        return ExpandStepResponse(
+            sub_steps=[],
+            can_expand=False,
+            stop_reason="max_depth",
+            message="Maximum explanation depth reached. Consider watching a video or reading detailed notes."
+        )
+    
+    # Build context from previous steps
+    prev_context = ""
+    if request.previous_steps:
+        prev_context = "\n".join([
+            f"- {s.label}: {s.title} ({s.summary})" 
+            for s in request.previous_steps[:5]  # Limit to last 5
+        ])
+    
+    # Build optional sections (f-strings can't have backslashes)
+    math_line = f"- Math: {request.step_math}" if request.step_math else ""
+    prev_section = f"PREVIOUS CONTEXT:\n{prev_context}" if prev_context else ""
+    
+    # Build the prompt
+    prompt = f"""You are a math tutor explaining a solution step in more detail.
+
+PROBLEM: {request.problem_statement}
+TOPIC: {request.topic}
+
+STEP TO BREAK DOWN:
+- Title: {request.step_title}
+- Explanation: {request.step_explanation}
+{math_line}
+
+{prev_section}
+
+Break this step into 2-4 smaller sub-steps that explain HOW this step works.
+
+RULES:
+1. Do NOT restate the overall problem
+2. Do NOT introduce new high-level concepts
+3. Each sub-step should be NARROWER than the parent
+4. Each explanation: 1-4 sentences max
+5. Include math_expression only if there's a specific formula/equation
+6. Set can_expand: false if a sub-step is atomic (cannot be broken down further)
+
+Return ONLY valid JSON matching this format (no markdown, no extra text):
+{{
+  "sub_steps": [
+    {{
+      "order": 1,
+      "title": "Sub-step title",
+      "explanation": "Brief explanation",
+      "math_expression": "optional LaTeX",
+      "can_expand": true
+    }}
+  ],
+  "is_atomic": false
+}}
+
+Set is_atomic: true if this step cannot be meaningfully decomposed."""
+
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        import json
+        import re
+        import uuid
+        
+        llm = ChatGoogleGenerativeAI(
+            model=settings.text_model,
+            google_api_key=settings.google_api_key,
+            temperature=0.3
+        )
+        
+        result = await llm.ainvoke(prompt)
+        response_text = result.content
+        
+        # Parse JSON from response
+        start_idx = response_text.find('{')
+        if start_idx == -1:
+            raise ValueError("No JSON in response")
+        
+        # Find matching brace
+        brace_count = 0
+        end_idx = start_idx
+        for i, char in enumerate(response_text[start_idx:], start_idx):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end_idx = i
+                    break
+        
+        json_str = response_text[start_idx:end_idx + 1]
+        
+        # Fix common JSON escape issues with LaTeX backslashes
+        # The LLM often returns unescaped backslashes in LaTeX
+        import re
+        # Replace single backslashes that aren't already escaped or valid JSON escapes
+        # Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+        def fix_backslashes(s):
+            result = []
+            i = 0
+            while i < len(s):
+                if s[i] == '\\' and i + 1 < len(s):
+                    next_char = s[i + 1]
+                    # Valid JSON escape sequences
+                    if next_char in '"\\bfnrtu/':
+                        result.append(s[i:i+2])
+                        i += 2
+                    else:
+                        # Escape the backslash for JSON
+                        result.append('\\\\')
+                        i += 1
+                else:
+                    result.append(s[i])
+                    i += 1
+            return ''.join(result)
+        
+        json_str = fix_backslashes(json_str)
+        data = json.loads(json_str)
+        
+        # Check if atomic
+        if data.get("is_atomic", False):
+            return ExpandStepResponse(
+                sub_steps=[],
+                can_expand=False,
+                stop_reason="atomic",
+                message="This step is already at its most fundamental level."
+            )
+        
+        # Build sub-steps with IDs and labels
+        sub_steps = []
+        for item in data.get("sub_steps", []):
+            order = item.get("order", len(sub_steps) + 1)
+            sub_step = SubStep(
+                id=str(uuid.uuid4()),
+                label=f"{request.step_path}.{order}",
+                order=order,
+                title=item.get("title", ""),
+                explanation=item.get("explanation", ""),
+                math_expression=item.get("math_expression"),
+                can_expand=item.get("can_expand", True) and (request.current_depth + 1 < 3)
+            )
+            sub_steps.append(sub_step)
+        
+        # Simple loop detection: check for very similar titles to parent
+        parent_title_lower = request.step_title.lower()
+        filtered_steps = []
+        for s in sub_steps:
+            if s.title.lower() == parent_title_lower:
+                logger.warning(f"[ExpandStep] Loop detected: sub-step title matches parent")
+                continue
+            filtered_steps.append(s)
+        
+        if len(filtered_steps) == 0:
+            return ExpandStepResponse(
+                sub_steps=[],
+                can_expand=False,
+                stop_reason="loop_risk",
+                message="Cannot break down further without repeating."
+            )
+        
+        return ExpandStepResponse(
+            sub_steps=filtered_steps,
+            can_expand=True
+        )
+        
+    except Exception as e:
+        logger.error(f"[ExpandStep] Error: {e}", exc_info=True)
+        return ExpandStepResponse(
+            sub_steps=[],
+            can_expand=False,
+            stop_reason="insufficient_context",
+            message=f"Could not generate sub-steps: {str(e)[:100]}"
+        )
 
 
 # ============================================================================

@@ -13,7 +13,7 @@ import { Upload, FileText, ImageIcon, X, History } from 'lucide-react';
 import { analyzeProblem, resumeWorkflow, generatePractice, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
 import { saveSession, getHistory, deleteSession, clearHistory, updateSession, type HistorySession } from './lib/storage';
-import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep } from './lib/types';
+import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep } from './lib/types';
 
 type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'history' | 'error';
 
@@ -30,6 +30,7 @@ function App() {
   const [practiceLoading, setPracticeLoading] = useState(false);
   const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [currentSubSteps, setCurrentSubSteps] = useState<Record<string, SubStep[]>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load history on mount
@@ -282,6 +283,8 @@ function App() {
     });
     setOriginalProblem(session.problem);
     setCurrentSessionId(session.id);
+    // Load expanded sub-steps from history
+    setCurrentSubSteps(session.expandedSubSteps || {});
     // Set practice questions if exists, otherwise clear them
     if (session.practiceQuiz && session.practiceQuiz.length > 0) {
       setPracticeQuestions(session.practiceQuiz);
@@ -319,6 +322,14 @@ function App() {
     }
 
     if (state === 'solution' && (response?.final_response_html || response?.solution_steps)) {
+      const handleSubStepsChange = async (subSteps: Record<string, SubStep[]>) => {
+        setCurrentSubSteps(subSteps);
+        if (currentSessionId) {
+          await updateSession(currentSessionId, { expandedSubSteps: subSteps });
+          setHistorySessions(await getHistory());
+        }
+      };
+
       return (
         <SolutionView
           html={response.final_response_html}
@@ -328,6 +339,8 @@ function App() {
           originalProblem={originalProblem}
           onPracticeClick={handlePracticeClick}
           practiceLoading={practiceLoading}
+          initialSubSteps={currentSubSteps}
+          onSubStepsChange={handleSubStepsChange}
         />
       );
     }

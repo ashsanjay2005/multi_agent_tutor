@@ -1,16 +1,11 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { ChevronDown, ChevronUp, CheckCircle2, Copy, RotateCcw, GraduationCap, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
-
-interface SolutionStep {
-  step_number: number;
-  title: string;
-  explanation: string;
-  math_expression?: string;
-}
+import { expandStep } from '../lib/api';
+import type { SolutionStep, SubStep, StopReason } from '../lib/types';
 
 interface SolutionViewProps {
   html?: string;
@@ -20,6 +15,8 @@ interface SolutionViewProps {
   originalProblem?: string;
   onPracticeClick?: () => void;
   practiceLoading?: boolean;
+  initialSubSteps?: Record<string, SubStep[]>;  // Loaded from history
+  onSubStepsChange?: (subSteps: Record<string, SubStep[]>) => void;  // Save to history
 }
 
 // Parse text and render inline LaTeX ($...$) and display LaTeX ($$...$$)
@@ -127,8 +124,16 @@ function MathDisplay({ latex }: { latex: string }) {
   );
 }
 
-export function SolutionView({ html, topic, solutionSteps, finalAnswer, originalProblem: _originalProblem, onPracticeClick, practiceLoading }: SolutionViewProps) {
+export function SolutionView({
+  html, topic, solutionSteps, finalAnswer, originalProblem,
+  onPracticeClick, practiceLoading,
+  initialSubSteps, onSubStepsChange
+}: SolutionViewProps) {
   const [expandedStep, setExpandedStep] = useState<number | null>(1);
+  // Track sub-steps for each step by step path - initialize from history
+  const [subStepsMap, setSubStepsMap] = useState<Record<string, SubStep[]>>(initialSubSteps || {});
+  const [expandingPath, setExpandingPath] = useState<string | null>(null);
+  const [stopReasons, setStopReasons] = useState<Record<string, { reason: StopReason; message: string }>>({});
 
   const toggleStep = (stepNum: number) => {
     setExpandedStep(expandedStep === stepNum ? null : stepNum);
@@ -141,6 +146,45 @@ export function SolutionView({ html, topic, solutionSteps, finalAnswer, original
       .join('\n\n');
     navigator.clipboard.writeText(text + (finalAnswer ? `\n\nAnswer: ${finalAnswer}` : ''));
   };
+
+  const handleExpandStep = useCallback(async (
+    stepId: string,
+    stepPath: string,
+    step: { title: string; explanation: string; math_expression?: string },
+    depth: number
+  ) => {
+    if (expandingPath || depth >= 3) return;
+
+    setExpandingPath(stepPath);
+    try {
+      const result = await expandStep({
+        step_id: stepId,
+        step_path: stepPath,
+        step_title: step.title,
+        step_explanation: step.explanation,
+        step_math: step.math_expression,
+        problem_statement: originalProblem || '',
+        topic: topic || '',
+        current_depth: depth,
+      });
+
+      if (result.stop_reason) {
+        setStopReasons(prev => ({
+          ...prev,
+          [stepPath]: { reason: result.stop_reason!, message: result.message || '' }
+        }));
+      } else if (result.sub_steps.length > 0) {
+        const newMap = { ...subStepsMap, [stepPath]: result.sub_steps };
+        setSubStepsMap(newMap);
+        // Persist to history
+        onSubStepsChange?.(newMap);
+      }
+    } catch (err) {
+      console.error('Expand step failed:', err);
+    } finally {
+      setExpandingPath(null);
+    }
+  }, [expandingPath, originalProblem, topic, subStepsMap, onSubStepsChange]);
 
   // Render step-by-step solution
   if (solutionSteps && solutionSteps.length > 0) {
@@ -158,6 +202,7 @@ export function SolutionView({ html, topic, solutionSteps, finalAnswer, original
         <div className="space-y-2">
           {solutionSteps.map((step) => {
             const isExpanded = expandedStep === step.step_number;
+            const stepPath = String(step.step_number);
 
             return (
               <div key={step.step_number} className="relative">
@@ -196,6 +241,97 @@ export function SolutionView({ html, topic, solutionSteps, finalAnswer, original
                     {/* Display Math Expression */}
                     {step.math_expression && (
                       <MathDisplay latex={step.math_expression} />
+                    )}
+
+                    {/* Sub-steps (if expanded) */}
+                    {subStepsMap[stepPath] && (
+                      <div className="mt-3 space-y-2 pl-2 border-l border-slate-600">
+                        {subStepsMap[stepPath].map((sub) => (
+                          <div key={sub.id} className="text-xs">
+                            <div className="font-medium text-blue-300 mb-1">
+                              {sub.label}: {sub.title}
+                            </div>
+                            <div className="text-slate-400 ml-2">
+                              <TextWithMath text={sub.explanation} />
+                            </div>
+                            {sub.math_expression && (
+                              <div className="ml-2 mt-1">
+                                <MathDisplay latex={sub.math_expression} />
+                              </div>
+                            )}
+                            {/* Recursive expand for sub-steps */}
+                            {sub.can_expand && !subStepsMap[sub.label] && !stopReasons[sub.label] && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-2 mt-1 text-xs text-slate-400 hover:text-blue-300"
+                                onClick={() => handleExpandStep(
+                                  sub.id,
+                                  sub.label,
+                                  sub,
+                                  stepPath.split('.').length
+                                )}
+                                disabled={expandingPath === sub.label}
+                              >
+                                {expandingPath === sub.label ? (
+                                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Expanding...</>
+                                ) : (
+                                  <><Layers className="h-3 w-3 mr-1" /> Break down</>
+                                )}
+                              </Button>
+                            )}
+                            {/* Show stop reason for sub-step */}
+                            {stopReasons[sub.label] && (
+                              <div className="ml-2 mt-1 text-xs text-amber-400/70">
+                                {stopReasons[sub.label].message}
+                              </div>
+                            )}
+                            {/* Show nested sub-steps */}
+                            {subStepsMap[sub.label] && (
+                              <div className="mt-2 ml-2 space-y-1 pl-2 border-l border-slate-700">
+                                {subStepsMap[sub.label].map(nested => (
+                                  <div key={nested.id} className="text-xs">
+                                    <span className="text-purple-300">{nested.label}:</span>{' '}
+                                    <span className="text-slate-400">{nested.title}</span>
+                                    <div className="text-slate-500 ml-2">
+                                      <TextWithMath text={nested.explanation} />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Stop reason message */}
+                    {stopReasons[stepPath] && (
+                      <div className="mt-2 text-xs text-amber-400/70 flex items-center gap-1">
+                        <span>⚠</span> {stopReasons[stepPath].message}
+                      </div>
+                    )}
+
+                    {/* Break Down Button - only if no sub-steps yet and no stop reason */}
+                    {!subStepsMap[stepPath] && !stopReasons[stepPath] && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="mt-3 h-7 text-xs text-slate-400 hover:text-blue-300 border border-slate-700 hover:border-blue-500/50"
+                        onClick={() => handleExpandStep(
+                          step.id || `step-${step.step_number}`,
+                          stepPath,
+                          step,
+                          0
+                        )}
+                        disabled={expandingPath === stepPath}
+                      >
+                        {expandingPath === stepPath ? (
+                          <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Breaking down...</>
+                        ) : (
+                          <><Layers className="h-3 w-3 mr-1" /> Break down this step</>
+                        )}
+                      </Button>
                     )}
                   </div>
                 )}

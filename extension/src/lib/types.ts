@@ -17,12 +17,7 @@ export interface AnalyzeRequest {
     thread_id?: string;
 }
 
-export interface SolutionStep {
-    step_number: number;
-    title: string;
-    explanation: string;
-    math_expression?: string;
-}
+// SolutionStep is defined below with sub_step support
 
 export interface AnalyzeResponse {
     thread_id: string;
@@ -76,4 +71,55 @@ export interface PracticeRequest {
 export interface PracticeResponse {
     topic: string;
     questions: PracticeQuestion[];
+}
+
+// Sub-step expansion types
+export type StopReason = 'atomic' | 'max_depth' | 'loop_risk' | 'insufficient_context';
+
+export interface SolutionStep {
+    step_number: number;
+    title: string;
+    explanation: string;
+    math_expression?: string;
+    // Extension for recursive sub-steps
+    id?: string;           // Stable unique ID
+    label?: string;        // Display label (e.g., "1.2.1")
+    sub_steps?: SolutionStep[];
+    can_expand?: boolean;  // Default true
+    depth?: number;        // 0=top-level
+}
+
+export interface PreviousStepSummary {
+    label: string;
+    title: string;
+    summary: string;
+}
+
+export interface ExpandStepRequest {
+    step_id: string;
+    step_path: string;
+    step_title: string;
+    step_explanation: string;
+    step_math?: string;
+    problem_statement: string;
+    topic: string;
+    current_depth: number;
+    previous_steps?: PreviousStepSummary[];
+}
+
+export interface SubStep {
+    id: string;
+    label: string;
+    order: number;
+    title: string;
+    explanation: string;
+    math_expression?: string;
+    can_expand: boolean;
+}
+
+export interface ExpandStepResponse {
+    sub_steps: SubStep[];
+    can_expand: boolean;
+    stop_reason?: StopReason;
+    message?: string;
 }

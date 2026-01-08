@@ -2,7 +2,7 @@
  * Chrome Storage utility for persisting session history
  */
 
-import type { SolutionStep, PracticeQuestion } from './types';
+import type { SolutionStep, PracticeQuestion, SubStep } from './types';
 
 export interface HistorySession {
     id: string;
@@ -13,6 +13,7 @@ export interface HistorySession {
     finalAnswer: string;
     practiceQuiz?: PracticeQuestion[];
     practiceScore?: { correct: number; total: number };
+    expandedSubSteps?: Record<string, SubStep[]>;  // Persisted sub-step expansions
 }
 
 const STORAGE_KEY = 'ai_tutor_history';
@@ -55,7 +56,7 @@ export async function saveSession(session: Omit<HistorySession, 'id' | 'timestam
  */
 export async function updateSession(
     sessionId: string,
-    updates: Partial<Pick<HistorySession, 'practiceQuiz' | 'practiceScore'>>
+    updates: Partial<Pick<HistorySession, 'practiceQuiz' | 'practiceScore' | 'expandedSubSteps'>>
 ): Promise<void> {
     const history = await getHistory();
     const index = history.findIndex(s => s.id === sessionId);

@@ -6,11 +6,11 @@ import type {
     AnalyzeRequest,
     AnalyzeResponse,
     ResumeRequest,
-    ExplainStepRequest,
-    ExplainStepResponse,
     HealthResponse,
     PracticeRequest,
     PracticeResponse,
+    ExpandStepRequest,
+    ExpandStepResponse,
 } from './types';
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -118,12 +118,12 @@ export async function resumeWorkflow(
 }
 
 /**
- * Get explanation for a specific step
+ * Expand a step into sub-steps
  */
-export async function explainStep(
-    request: ExplainStepRequest
-): Promise<ExplainStepResponse> {
-    return fetchAPI<ExplainStepResponse>('/v1/explain_step', {
+export async function expandStep(
+    request: ExpandStepRequest
+): Promise<ExpandStepResponse> {
+    return fetchAPI<ExpandStepResponse>('/v1/expand_step', {
         method: 'POST',
         body: JSON.stringify(request),
     });
