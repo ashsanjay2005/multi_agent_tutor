@@ -7,14 +7,21 @@ import uuid
 from typing import Literal, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 import base64
 
 from config import settings
 from graph import get_graph
 from state import GraphState
+from rate_limiter import (
+    init_rate_limiter, 
+    close_rate_limiter, 
+    get_rate_limiter,
+    RateLimitConfig
+)
 
 # Configure logging
 logging.basicConfig(
@@ -62,6 +69,7 @@ class AnalyzeResponse(BaseModel):
     confidence_score: Optional[float] = None
     solution_steps: Optional[list[dict]] = None  # Step-by-step solution
     final_answer: Optional[str] = None  # Final answer from solver
+    extracted_problem: Optional[str] = None  # Problem text (extracted from image or original text)
 
 class HealthResponse(BaseModel):
     status: str
@@ -78,14 +86,32 @@ app_graph = None
 async def lifespan(app: FastAPI):
     global app_graph
     logger.info("Starting up AI Math Tutor Backend...")
+    
+    # Initialize rate limiter
+    try:
+        rate_config = RateLimitConfig(
+            free_limit=settings.rate_limit_free,
+            pro_limit=settings.rate_limit_pro,
+            window_seconds=settings.rate_limit_window
+        )
+        await init_rate_limiter(settings.redis_url)
+        logger.info(f"Rate limiter initialized (free={settings.rate_limit_free}/min, pro={settings.rate_limit_pro}/min)")
+    except Exception as e:
+        logger.warning(f"Rate limiter unavailable (Redis connection failed): {e}")
+    
+    # Initialize graph
     try:
         app_graph = await get_graph()
         logger.info("LangGraph workflow initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize graph: {e}")
         raise
+    
     yield
+    
+    # Cleanup
     logger.info("Shutting down...")
+    await close_rate_limiter()
 
 app = FastAPI(
     title="AI Math Tutor API",
@@ -110,11 +136,55 @@ app.add_middleware(
 async def health_check():
     return HealthResponse(status="healthy", environment=settings.environment)
 
+@app.get("/v1/quota")
+async def get_quota(user_id: str = "anonymous"):
+    """Get current rate limit quota status for a user."""
+    try:
+        limiter = await get_rate_limiter()
+        user_tier = "free"  # In production, look up from DB
+        quota = await limiter.get_quota_status(user_id, tier=user_tier)
+        return quota
+    except RuntimeError:
+        # Rate limiter not available
+        return {
+            "remaining": -1,  # -1 means unlimited
+            "limit": -1,
+            "window_seconds": 60,
+            "reset_in_seconds": 0,
+            "tier": "unlimited",
+            "message": "Rate limiting not enabled"
+        }
+
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
 async def analyze_problem(request: AnalyzeRequest):
     global app_graph
     if app_graph is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Graph not initialized")
+    
+    # Check rate limit
+    try:
+        limiter = await get_rate_limiter()
+        # Default to free tier - in production, you'd look up user tier from DB
+        user_tier = "free"  
+        allowed, remaining, reset_in = await limiter.check_rate_limit(
+            request.user_id, 
+            tier=user_tier
+        )
+        if not allowed:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": "Rate limit exceeded",
+                    "message": f"Too many requests. Try again in {reset_in} seconds.",
+                    "retry_after": reset_in,
+                    "remaining": 0,
+                    "limit": settings.rate_limit_free if user_tier == "free" else settings.rate_limit_pro
+                },
+                headers={"Retry-After": str(reset_in)}
+            )
+    except RuntimeError:
+        # Rate limiter not available, continue without limiting
+        logger.debug("Rate limiter not available, skipping rate limit check")
     
     thread_id = request.thread_id or str(uuid.uuid4())
     logger.info(f"[Analyze] Request Type: {request.type}, Thread: {thread_id}")
@@ -154,7 +224,8 @@ async def analyze_problem(request: AnalyzeRequest):
             topic=result.get("topic"),
             confidence_score=result.get("confidence_score"),
             solution_steps=result.get("solution_steps"),
-            final_answer=result.get("worked_example")
+            final_answer=result.get("worked_example"),
+            extracted_problem=result.get("input_content")  # Contains extracted text for images
         )
     except Exception as e:
         logger.error(f"[Analyze] Error: {e}", exc_info=True)

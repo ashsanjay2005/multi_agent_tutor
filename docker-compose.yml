@@ -14,12 +14,28 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
       - math-tutor-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: math-tutor-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - math-tutor-network
+    command: redis-server --appendonly yes
 
   backend:
     build:
@@ -28,6 +44,7 @@ services:
     container_name: math-tutor-backend
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-math_tutor}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ENVIRONMENT=${ENVIRONMENT:-development}
@@ -41,15 +58,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - math-tutor-network
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
+
 
 networks:
   math-tutor-network:
     driver: bridge
-
-

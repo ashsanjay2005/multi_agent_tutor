@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Button } from './components/ui/button';
 import { Textarea } from './components/ui/textarea';
@@ -8,15 +8,17 @@ import { LoadingView } from './components/LoadingView';
 import { DisambiguationView } from './components/DisambiguationView';
 import { SolutionView } from './components/SolutionView';
 import { PracticeView } from './components/PracticeView';
-import { Upload, FileText, ImageIcon, X } from 'lucide-react';
-import { analyzeProblem, resumeWorkflow, generatePractice, APIError } from './lib/api';
+import { HistoryView } from './components/HistoryView';
+import { Upload, FileText, ImageIcon, X, History } from 'lucide-react';
+import { analyzeProblem, resumeWorkflow, generatePractice, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
-import type { AnalyzeResponse, InputType, PracticeQuestion } from './lib/types';
+import { saveSession, getHistory, deleteSession, clearHistory, updateSession, type HistorySession } from './lib/storage';
+import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep } from './lib/types';
 
-type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'error';
+type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'history' | 'error';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'paste' | 'screenshot'>('paste');
+  const [activeTab, setActiveTab] = useState<'paste' | 'screenshot' | 'history'>('paste');
   const [state, setState] = useState<AppState>('idle');
   const [textInput, setTextInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +28,14 @@ function App() {
   const [originalProblem, setOriginalProblem] = useState<string>('');
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceLoading, setPracticeLoading] = useState(false);
+  const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load history on mount
+  useEffect(() => {
+    getHistory().then(setHistorySessions);
+  }, []);
 
   const handleAnalyze = async (type: InputType, content: string) => {
     if (!content.trim()) {
@@ -53,6 +62,20 @@ function App() {
         setState('disambiguation');
       } else if (result.status === 'completed') {
         setState('solution');
+
+        // Save to history - use extracted_problem for images (not base64)
+        if (result.solution_steps && result.topic) {
+          const problemText = result.extracted_problem || content;
+          const saved = await saveSession({
+            problem: problemText,
+            topic: result.topic,
+            solutionSteps: result.solution_steps as SolutionStep[],
+            finalAnswer: result.final_answer || '',
+          });
+          setCurrentSessionId(saved.id);
+          setOriginalProblem(problemText);
+          setHistorySessions(await getHistory());
+        }
       } else if (result.status === 'requires_clarification') {
         setState('error');
         setError('Could not understand the problem. Please provide more details.');
@@ -62,7 +85,9 @@ function App() {
       }
     } catch (err) {
       setState('error');
-      if (err instanceof APIError) {
+      if (err instanceof RateLimitError) {
+        setError(`Rate limit exceeded. Try again in ${err.retryAfter} seconds. (${err.remaining}/${err.limit} remaining)`);
+      } else if (err instanceof APIError) {
         setError(err.message);
       } else {
         setError('Failed to connect to the backend. Make sure the server is running.');
@@ -165,6 +190,15 @@ function App() {
         num_questions: 3
       });
       setPracticeQuestions(result.questions);
+
+      // Save quiz immediately to session
+      if (currentSessionId) {
+        await updateSession(currentSessionId, {
+          practiceQuiz: result.questions,
+        });
+        setHistorySessions(await getHistory());
+      }
+
       setState('practice');
     } catch (err) {
       console.error('Practice generation error:', err);
@@ -174,9 +208,87 @@ function App() {
     }
   };
 
-  const handleBackFromPractice = () => {
+  const handleMoreQuestions = async () => {
+    if (!response?.topic || !originalProblem) return;
+
+    setPracticeLoading(true);
+    try {
+      const result = await generatePractice({
+        topic: response.topic,
+        original_problem: originalProblem,
+        num_questions: 3
+      });
+
+      // Append new questions to existing
+      const allQuestions = [...practiceQuestions, ...result.questions];
+      setPracticeQuestions(allQuestions);
+
+      // Save updated quiz to session
+      if (currentSessionId) {
+        await updateSession(currentSessionId, {
+          practiceQuiz: allQuestions,
+        });
+        setHistorySessions(await getHistory());
+      }
+    } catch (err) {
+      console.error('More questions error:', err);
+    } finally {
+      setPracticeLoading(false);
+    }
+  };
+
+  const handleBackFromPractice = async (score?: { correct: number; total: number }) => {
+    // Update session with cumulative practice score if provided
+    if (currentSessionId && score) {
+      // Get existing score and add to it
+      const sessions = await getHistory();
+      const currentSession = sessions.find(s => s.id === currentSessionId);
+      const existingScore = currentSession?.practiceScore || { correct: 0, total: 0 };
+
+      const newScore = {
+        correct: existingScore.correct + score.correct,
+        total: existingScore.total + score.total,
+      };
+
+      await updateSession(currentSessionId, {
+        practiceQuiz: practiceQuestions,
+        practiceScore: newScore,
+      });
+      setHistorySessions(await getHistory());
+    }
     setState('solution');
     setPracticeQuestions([]);
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    await deleteSession(sessionId);
+    setHistorySessions(await getHistory());
+  };
+
+  const handleClearHistory = async () => {
+    await clearHistory();
+    setHistorySessions([]);
+  };
+
+  const handleSelectSession = (session: HistorySession) => {
+    // Load session into view
+    setResponse({
+      thread_id: '',
+      status: 'completed',
+      requires_user_action: false,
+      topic: session.topic,
+      solution_steps: session.solutionSteps,
+      final_answer: session.finalAnswer,
+    });
+    setOriginalProblem(session.problem);
+    setCurrentSessionId(session.id);
+    // Set practice questions if exists, otherwise clear them
+    if (session.practiceQuiz && session.practiceQuiz.length > 0) {
+      setPracticeQuestions(session.practiceQuiz);
+    } else {
+      setPracticeQuestions([]);
+    }
+    setState('solution');
   };
 
   // Render current view based on state
@@ -200,6 +312,8 @@ function App() {
           topic={response?.topic || ''}
           questions={practiceQuestions}
           onBack={handleBackFromPractice}
+          onMoreQuestions={handleMoreQuestions}
+          loading={practiceLoading}
         />
       );
     }
@@ -233,17 +347,36 @@ function App() {
       );
     }
 
-    // Default: Show input interface
+    if (state === 'history') {
+      return (
+        <HistoryView
+          sessions={historySessions}
+          onDelete={handleDeleteSession}
+          onClearAll={handleClearHistory}
+          onSelectSession={handleSelectSession}
+        />
+      );
+    }
+
     return (
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
-        <TabsList className="grid w-full grid-cols-2">
+        <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="paste">
-            <FileText className="h-4 w-4 mr-2" />
-            Paste Text
+            <FileText className="h-4 w-4 mr-1" />
+            Text
           </TabsTrigger>
           <TabsTrigger value="screenshot">
-            <Upload className="h-4 w-4 mr-2" />
-            Upload Image
+            <Upload className="h-4 w-4 mr-1" />
+            Image
+          </TabsTrigger>
+          <TabsTrigger value="history" onClick={() => setState('history')}>
+            <History className="h-4 w-4 mr-1" />
+            History
+            {historySessions.length > 0 && (
+              <span className="ml-1 text-xs bg-blue-500/30 px-1.5 rounded-full">
+                {historySessions.length}
+              </span>
+            )}
           </TabsTrigger>
         </TabsList>
 

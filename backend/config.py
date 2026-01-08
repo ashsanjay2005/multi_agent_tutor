@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["*"]
     
+    # Redis (for rate limiting)
+    redis_url: str = "redis://localhost:6379"
+    
+    # Rate Limiting
+    rate_limit_free: int = 5   # requests per minute for free tier
+    rate_limit_pro: int = 50   # requests per minute for pro tier
+    rate_limit_window: int = 60  # window in seconds
+    
     # Confidence Thresholds (for routing logic)
     confidence_threshold_low: float = 0.4
     confidence_threshold_high: float = 0.75

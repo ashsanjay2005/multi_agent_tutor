@@ -15,7 +15,9 @@ interface PracticeQuestion {
 interface PracticeViewProps {
     topic: string;
     questions: PracticeQuestion[];
-    onBack: () => void;
+    onBack: (score?: { correct: number; total: number }) => void;
+    onMoreQuestions?: () => void;
+    loading?: boolean;
 }
 
 // Render LaTeX in text
@@ -44,7 +46,7 @@ function TextWithMath({ text }: { text: string }) {
     return <span dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-export function PracticeView({ topic, questions, onBack }: PracticeViewProps) {
+export function PracticeView({ topic, questions, onBack, onMoreQuestions, loading }: PracticeViewProps) {
     const [currentQuestion, setCurrentQuestion] = useState(0);
     const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
     const [showResult, setShowResult] = useState(false);
@@ -98,10 +100,25 @@ export function PracticeView({ topic, questions, onBack }: PracticeViewProps) {
                     </CardContent>
                 </Card>
 
-                <Button onClick={onBack} variant="outline" className="w-full">
-                    <ArrowLeft className="h-4 w-4 mr-2" />
-                    Back to Solution
-                </Button>
+                <div className="flex gap-2">
+                    <Button
+                        onClick={() => onBack({ correct: score, total: questions.length })}
+                        variant="outline"
+                        className="flex-1"
+                    >
+                        <ArrowLeft className="h-4 w-4 mr-2" />
+                        Done
+                    </Button>
+                    {onMoreQuestions && (
+                        <Button
+                            onClick={onMoreQuestions}
+                            className="flex-1"
+                            disabled={loading}
+                        >
+                            {loading ? 'Generating...' : '+3 More Questions'}
+                        </Button>
+                    )}
+                </div>
             </div>
         );
     }
@@ -148,12 +165,12 @@ export function PracticeView({ topic, questions, onBack }: PracticeViewProps) {
                                     onClick={() => handleAnswer(index)}
                                     disabled={showResult}
                                     className={`w-full text-left p-3 rounded-lg border transition-all flex items-center gap-3 ${showCorrect
-                                            ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                                            : showIncorrect
-                                                ? 'bg-red-500/20 border-red-500 text-red-300'
-                                                : isSelected
-                                                    ? 'bg-blue-500/20 border-blue-500'
-                                                    : 'bg-slate-800/50 border-slate-700 hover:border-slate-500'
+                                        ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                                        : showIncorrect
+                                            ? 'bg-red-500/20 border-red-500 text-red-300'
+                                            : isSelected
+                                                ? 'bg-blue-500/20 border-blue-500'
+                                                : 'bg-slate-800/50 border-slate-700 hover:border-slate-500'
                                         }`}
                                 >
                                     <span className="flex-shrink-0 h-6 w-6 rounded-full border border-current flex items-center justify-center text-xs font-bold">
@@ -183,7 +200,7 @@ export function PracticeView({ topic, questions, onBack }: PracticeViewProps) {
 
             {/* Navigation */}
             <div className="flex gap-2">
-                <Button onClick={onBack} variant="outline" size="sm">
+                <Button onClick={() => onBack()} variant="outline" size="sm">
                     <ArrowLeft className="h-4 w-4 mr-1" />
                     Back
                 </Button>

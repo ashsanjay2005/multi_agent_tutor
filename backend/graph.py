@@ -214,9 +214,9 @@ async def vision_classifier_node(state: GraphState) -> GraphState:
         temperature=0
     )
     
-    # Retry logic for rate limits
-    max_retries = 3
-    retry_delay = 2
+    # Retry logic for rate limits - API recommends 45s wait
+    max_retries = 2
+    retry_delay = 45  # Gemini free tier needs 45s to reset
     
     for attempt in range(max_retries):
         try:
@@ -247,12 +247,28 @@ Be specific with the topic. Use confidence 1.0 for clear STEM problems."""},
             result = await llm.ainvoke([combined_message])
             response_text = result.content
             
-            # Parse JSON from response
-            json_match = re.search(r'\{[\s\S]*?\}', response_text)
-            if json_match:
-                data = json.loads(json_match.group())
-            else:
-                raise ValueError(f"Could not parse JSON from: {response_text[:200]}")
+            # Debug: log the raw response
+            print(f"[VisionClassifier] Raw response: {response_text[:300]}...")
+            
+            # Parse JSON from response - find matching braces
+            start_idx = response_text.find('{')
+            if start_idx == -1:
+                raise ValueError(f"No JSON found in response: {response_text[:200]}")
+            
+            # Find the matching closing brace
+            brace_count = 0
+            end_idx = start_idx
+            for i, char in enumerate(response_text[start_idx:], start_idx):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i
+                        break
+            
+            json_str = response_text[start_idx:end_idx + 1]
+            data = json.loads(json_str)
             
             extracted_text = data.get("extracted_problem", "")
             subject = data.get("subject", "Math")
@@ -275,24 +291,33 @@ Be specific with the topic. Use confidence 1.0 for clear STEM problems."""},
             }
             
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "ResourceExhausted" in error_str or "quota" in error_str.lower():
-                if attempt < max_retries - 1:
-                    wait_time = retry_delay * (2 ** attempt)
-                    print(f"[VisionClassifier] Rate limited, retrying in {wait_time}s...")
-                    await asyncio.sleep(wait_time)
-                    continue
+            error_str = str(e).lower()
+            is_rate_limit = "429" in str(e) or "resourceexhausted" in error_str or "quota" in error_str
+            is_parse_error = "json" in error_str or "unterminated" in error_str or "parse" in error_str
+            
+            # Retry on rate limits or parse errors (sometimes API returns truncated response)
+            if (is_rate_limit or is_parse_error) and attempt < max_retries - 1:
+                wait_time = retry_delay if is_rate_limit else 5  # 45s for rate limit, 5s for parse error
+                print(f"[VisionClassifier] {'Rate limited' if is_rate_limit else 'Parse error'}, waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                continue
             
             print(f"[VisionClassifier] Error: {e}")
             import traceback
             traceback.print_exc()
+            
+            # Show appropriate error message
+            if is_rate_limit:
+                error_msg = "API rate limit reached. Please try again in a minute or paste the text instead."
+            else:
+                error_msg = "Failed to analyze image. Please try again or paste the text instead."
             
             return {
                 **state,
                 "topic": None,
                 "confidence_score": 0.3,
                 "detected_ambiguity": True,
-                "candidate_topics": ["API rate limit reached. Please try again in a minute or paste the text instead."]
+                "candidate_topics": [error_msg]
             }
     
     # Should not reach here
