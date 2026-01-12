@@ -5,7 +5,7 @@ import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <div className="dark">
+    <div className="dark h-[600px] overflow-y-auto">
       <App />
     </div>
   </React.StrictMode>

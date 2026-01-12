@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { ChevronDown, ChevronUp, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw } from 'lucide-react';
+import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { expandStep } from '../lib/api';
@@ -17,6 +17,33 @@ interface SolutionViewProps {
   practiceLoading?: boolean;
   initialSubSteps?: Record<string, SubStep[]>;  // Loaded from history
   onSubStepsChange?: (subSteps: Record<string, SubStep[]>) => void;  // Save to history
+  hasStoredQuiz?: boolean;  // True if there's a saved quiz to review
+  onReviewQuiz?: () => void;  // Callback to review stored quiz
+}
+
+// ============================================================================
+// DEPTH-BASED STYLING HELPERS
+// ============================================================================
+
+// Get hierarchy line style based on depth
+function getHierarchyLineStyle(depth: number): { width: string; opacity: number; color: string } {
+  switch (depth) {
+    case 0:
+    case 1:
+      return { width: '2px', opacity: 1, color: 'rgb(59, 130, 246)' }; // Level 1: solid blue
+    case 2:
+      return { width: '1.5px', opacity: 0.6, color: 'rgb(59, 130, 246)' }; // Level 2: 60% opacity
+    default:
+      return { width: '1px', opacity: 0.3, color: 'rgb(59, 130, 246)' }; // Level 3+: 30% opacity
+  }
+}
+
+// Get semantic tag for deep nesting (depth >= 3)
+const SEMANTIC_TAGS = ['Concept', 'Definition', 'Deep Dive', 'Detail', 'Insight'];
+function getSemanticTag(label: string): string {
+  // Use label hash to consistently pick a tag
+  const hash = label.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+  return SEMANTIC_TAGS[hash % SEMANTIC_TAGS.length];
 }
 
 // Parse text and render inline LaTeX ($...$) and display LaTeX ($$...$$)
@@ -69,7 +96,8 @@ function TextWithMath({ text }: { text: string }) {
 }
 
 // Render display LaTeX (for math_expression field)
-function MathDisplay({ latex }: { latex: string }) {
+// Ghost styling: no background at depth > 1, just centered with accent border
+function MathDisplay({ latex, depth = 0 }: { latex: string; depth?: number }) {
   const [html, setHtml] = useState('');
 
   useEffect(() => {
@@ -116,18 +144,45 @@ function MathDisplay({ latex }: { latex: string }) {
 
   if (!latex) return null;
 
+  // Ghost styling for nested math blocks (depth > 1)
+  const isGhost = depth > 1;
+
   return (
     <div
-      className="my-3 py-3 px-4 bg-slate-800/50 rounded-lg overflow-x-auto text-center"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+      className={`my-3 py-3 ${isGhost
+        ? 'border-l-2 border-teal-500/40 pl-4'  // Ghost: accent border only
+        : 'px-4 bg-slate-800/50 rounded-lg'     // Normal: background
+        }`}
+    >
+      {/* Math container - left aligned with thin scrollbar */}
+      <div
+        className="math-scroll-container"
+        style={{
+          overflowX: 'auto',
+          overflowY: 'visible',
+          paddingBottom: '2px',
+          scrollbarWidth: 'thin',  // Firefox
+        }}
+      >
+        <div
+          className="katex-wrapper"
+          style={{
+            display: 'inline-block',
+            transform: html.length > 2000 ? 'scale(0.9)' : 'scale(1)',
+            transformOrigin: 'left center',
+          }}
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </div>
+    </div>
   );
 }
 
 export function SolutionView({
   html, topic, solutionSteps, finalAnswer, originalProblem,
   onPracticeClick, practiceLoading,
-  initialSubSteps, onSubStepsChange
+  initialSubSteps, onSubStepsChange,
+  hasStoredQuiz, onReviewQuiz
 }: SolutionViewProps) {
   const [expandedStep, setExpandedStep] = useState<number | null>(1);
   // Track sub-steps for each step by step path - initialize from history
@@ -206,35 +261,38 @@ export function SolutionView({
 
             return (
               <div key={step.step_number} className="relative">
-                {/* Step Header */}
+                {/* Step Header - Elevated card style */}
                 <button
                   onClick={() => toggleStep(step.step_number)}
-                  className={`w-full text-left p-3 rounded-lg transition-all flex items-start gap-3 ${isExpanded
-                    ? 'bg-blue-500/10 border border-blue-500/30'
-                    : 'bg-slate-800/50 hover:bg-slate-800 border border-transparent'
+                  className={`w-full text-left p-4 rounded-xl transition-all flex items-start gap-3 ${isExpanded
+                    ? 'bg-slate-800/80 shadow-lg shadow-blue-500/5 ring-1 ring-blue-500/20'
+                    : 'bg-slate-800/40 hover:bg-slate-800/60 shadow-md'
                     }`}
                 >
-                  <div className={`flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-xs font-bold ${isExpanded ? 'bg-blue-500 text-white' : 'bg-slate-700 text-slate-300'
+                  {/* Step number badge */}
+                  <div className={`flex-shrink-0 h-7 w-7 rounded-lg flex items-center justify-center text-xs font-bold transition-all ${isExpanded
+                    ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-md shadow-blue-500/30'
+                    : 'bg-slate-700/80 text-slate-300'
                     }`}>
                     {step.step_number}
                   </div>
 
                   <div className="flex-1 min-w-0">
-                    <span className={`font-medium text-sm ${isExpanded ? 'text-blue-400' : 'text-slate-200'}`}>
+                    <span className={`font-medium text-sm leading-tight ${isExpanded ? 'text-white' : 'text-slate-200'}`}>
                       {step.title}
                     </span>
                   </div>
 
-                  <div className="flex-shrink-0 text-slate-400">
-                    {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  <div className={`flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
+                    <ChevronDown className={`h-4 w-4 ${isExpanded ? 'text-blue-400' : 'text-slate-500'}`} />
                   </div>
                 </button>
 
-                {/* Expanded Content */}
+                {/* Expanded Content - Clean spatial hierarchy */}
                 {isExpanded && (
-                  <div className="mt-1 ml-9 p-3 bg-slate-900/50 rounded-lg border-l-2 border-blue-500/50">
+                  <div className="mt-2 ml-4 pl-6 border-l border-slate-700/50">
                     {/* Explanation with inline LaTeX */}
-                    <div className="text-sm text-slate-300 leading-relaxed">
+                    <div className="text-sm text-slate-300 leading-relaxed py-3">
                       <TextWithMath text={step.explanation} />
                     </div>
 
@@ -243,67 +301,114 @@ export function SolutionView({
                       <MathDisplay latex={step.math_expression} />
                     )}
 
-                    {/* Sub-steps (if expanded) */}
-                    {subStepsMap[stepPath] && (
-                      <div className="mt-3 space-y-2 pl-2 border-l border-slate-600">
-                        {subStepsMap[stepPath].map((sub) => (
-                          <div key={sub.id} className="text-xs">
-                            <div className="font-medium text-blue-300 mb-1">
-                              {sub.label}: {sub.title}
-                            </div>
-                            <div className="text-slate-400 ml-2">
-                              <TextWithMath text={sub.explanation} />
-                            </div>
-                            {sub.math_expression && (
-                              <div className="ml-2 mt-1">
-                                <MathDisplay latex={sub.math_expression} />
-                              </div>
-                            )}
-                            {/* Recursive expand for sub-steps */}
-                            {sub.can_expand && !subStepsMap[sub.label] && !stopReasons[sub.label] && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-6 px-2 mt-1 text-xs text-slate-400 hover:text-blue-300"
-                                onClick={() => handleExpandStep(
-                                  sub.id,
-                                  sub.label,
-                                  sub,
-                                  stepPath.split('.').length
-                                )}
-                                disabled={expandingPath === sub.label}
-                              >
-                                {expandingPath === sub.label ? (
-                                  <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Expanding...</>
-                                ) : (
-                                  <><Layers className="h-3 w-3 mr-1" /> Break down</>
-                                )}
-                              </Button>
-                            )}
-                            {/* Show stop reason for sub-step */}
-                            {stopReasons[sub.label] && (
-                              <div className="ml-2 mt-1 text-xs text-amber-400/70">
-                                {stopReasons[sub.label].message}
-                              </div>
-                            )}
-                            {/* Show nested sub-steps */}
-                            {subStepsMap[sub.label] && (
-                              <div className="mt-2 ml-2 space-y-1 pl-2 border-l border-slate-700">
-                                {subStepsMap[sub.label].map(nested => (
-                                  <div key={nested.id} className="text-xs">
-                                    <span className="text-purple-300">{nested.label}:</span>{' '}
-                                    <span className="text-slate-400">{nested.title}</span>
-                                    <div className="text-slate-500 ml-2">
-                                      <TextWithMath text={nested.explanation} />
-                                    </div>
+                    {/* Sub-steps (if expanded) with fading hierarchy */}
+                    {subStepsMap[stepPath] && (() => {
+                      const depth2Style = getHierarchyLineStyle(2);
+                      return (
+                        <div
+                          className="mt-4 space-y-4 pl-4"
+                          style={{
+                            borderLeftWidth: depth2Style.width,
+                            borderLeftStyle: 'solid',
+                            borderLeftColor: `rgba(100, 116, 139, ${depth2Style.opacity})`
+                          }}
+                        >
+                          {subStepsMap[stepPath].map((sub) => {
+                            const subDepth = stepPath.split('.').length + 1;
+                            const useSemanticLabel = subDepth >= 3;
+
+                            return (
+                              <div key={sub.id} className="text-xs bg-slate-800/30 rounded-lg p-3">
+                                {/* Label: numeric or semantic */}
+                                <div className="font-medium mb-2 flex items-center gap-2">
+                                  {useSemanticLabel ? (
+                                    <>
+                                      <span className="px-2 py-0.5 rounded-md text-[10px] bg-indigo-500/15 text-indigo-300 font-medium">
+                                        {getSemanticTag(sub.label)}
+                                      </span>
+                                      <span className="text-slate-200">{sub.title}</span>
+                                    </>
+                                  ) : (
+                                    <span className="text-slate-200">
+                                      <span className="text-blue-400 font-semibold">{sub.label}</span>: {sub.title}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-slate-400 leading-relaxed">
+                                  <TextWithMath text={sub.explanation} />
+                                </div>
+                                {sub.math_expression && (
+                                  <div className="ml-1 mt-1">
+                                    <MathDisplay latex={sub.math_expression} depth={subDepth} />
                                   </div>
-                                ))}
+                                )}
+                                {/* Recursive expand for sub-steps */}
+                                {sub.can_expand && !subStepsMap[sub.label] && !stopReasons[sub.label] && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-6 px-2 mt-1.5 text-xs text-slate-400 hover:text-blue-300"
+                                    onClick={() => handleExpandStep(
+                                      sub.id,
+                                      sub.label,
+                                      sub,
+                                      stepPath.split('.').length
+                                    )}
+                                    disabled={expandingPath === sub.label}
+                                  >
+                                    {expandingPath === sub.label ? (
+                                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Expanding...</>
+                                    ) : (
+                                      <><Layers className="h-3 w-3 mr-1" /> Break down</>
+                                    )}
+                                  </Button>
+                                )}
+                                {/* Show stop reason for sub-step */}
+                                {stopReasons[sub.label] && (
+                                  <div className="ml-1 mt-1 text-xs text-amber-400/70">
+                                    {stopReasons[sub.label].message}
+                                  </div>
+                                )}
+                                {/* Show nested sub-steps (depth 3+) with fading lines */}
+                                {subStepsMap[sub.label] && (() => {
+                                  const depth3Style = getHierarchyLineStyle(3);
+                                  return (
+                                    <div
+                                      className="mt-2 ml-1 space-y-2 pl-3"
+                                      style={{
+                                        borderLeftWidth: depth3Style.width,
+                                        borderLeftStyle: 'solid',
+                                        borderLeftColor: `rgba(59, 130, 246, ${depth3Style.opacity})`
+                                      }}
+                                    >
+                                      {subStepsMap[sub.label].map(nested => (
+                                        <div key={nested.id} className="text-xs">
+                                          {/* Semantic label for depth 3+ */}
+                                          <div className="flex items-center gap-2 mb-1">
+                                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-300/80 font-normal">
+                                              {getSemanticTag(nested.label)}
+                                            </span>
+                                            <span className="text-slate-400">{nested.title}</span>
+                                          </div>
+                                          <div className="text-slate-500 ml-1">
+                                            <TextWithMath text={nested.explanation} />
+                                          </div>
+                                          {nested.math_expression && (
+                                            <div className="ml-1 mt-1">
+                                              <MathDisplay latex={nested.math_expression} depth={3} />
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
                               </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
 
                     {/* Stop reason message */}
                     {stopReasons[stepPath] && (
@@ -340,35 +445,60 @@ export function SolutionView({
           })}
         </div>
 
-        {/* Final Answer */}
+        {/* Final Answer - Clean, subtle success styling */}
         {finalAnswer && (
-          <Card className="bg-emerald-500/10 border-emerald-500/30 mt-4">
-            <CardContent className="py-3 px-4">
-              <div className="flex items-center gap-3">
-                <CheckCircle2 className="h-5 w-5 text-emerald-400 flex-shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-xs text-emerald-400/70 font-medium">Answer</p>
-                  <div className="font-semibold text-emerald-300">
-                    <TextWithMath text={finalAnswer} />
-                  </div>
+          <div className="mt-6 pt-4 border-t border-slate-700/50">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 h-6 w-6 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-slate-500 font-medium mb-1">Final Answer</p>
+                <div className="text-sm text-slate-200 leading-relaxed">
+                  <TextWithMath text={finalAnswer} />
                 </div>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </div>
         )}
-        {/* Practice Quiz Button */}
-        <Button
-          onClick={onPracticeClick}
-          disabled={practiceLoading || !topic}
-          className="w-full mt-4 bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600"
-          size="lg"
-        >
-          {practiceLoading ? (
-            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating Quiz...</>
-          ) : (
-            <><GraduationCap className="h-4 w-4 mr-2" />Practice Quiz</>
+
+        {/* Practice Quiz - Interactive Badge/Pills */}
+        <div className="mt-5 flex flex-col items-center gap-2">
+          {/* Review Previous Quiz (if stored) */}
+          {hasStoredQuiz && onReviewQuiz && (
+            <button
+              onClick={onReviewQuiz}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 hover:border-emerald-400/50 transition-all"
+            >
+              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              <span className="text-sm font-medium text-slate-200">Review Previous Quiz</span>
+              <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-500/30 text-emerald-300">
+                Saved
+              </span>
+            </button>
           )}
-        </Button>
+
+          {/* Generate New Quiz */}
+          <button
+            onClick={onPracticeClick}
+            disabled={practiceLoading || !topic}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 hover:from-indigo-500/30 hover:to-purple-500/30 border border-indigo-500/30 hover:border-indigo-400/50 transition-all disabled:opacity-50"
+          >
+            {practiceLoading ? (
+              <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+            ) : (
+              <GraduationCap className="h-4 w-4 text-indigo-400" />
+            )}
+            <span className="text-sm font-medium text-slate-200">
+              {practiceLoading ? 'Generating...' : hasStoredQuiz ? 'Generate New Quiz' : '3 Questions Available'}
+            </span>
+            {!practiceLoading && !hasStoredQuiz && (
+              <span className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-500/30 text-indigo-300">
+                Quiz
+              </span>
+            )}
+          </button>
+        </div>
 
         {/* Action Buttons */}
         <div className="flex gap-2 pt-2">

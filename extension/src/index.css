@@ -55,4 +55,20 @@
   background: hsl(var(--primary));
 }
 
+/* Thin scrollbar for math containers */
+.math-scroll-container::-webkit-scrollbar {
+  height: 4px;
+}
 
+.math-scroll-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.math-scroll-container::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.4);
+  border-radius: 2px;
+}
+
+.math-scroll-container::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.6);
+}

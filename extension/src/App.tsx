@@ -131,6 +131,44 @@ function App() {
     reader.readAsDataURL(file);
   };
 
+  // Handle drag and drop
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      setError('Please select an image file (PNG, JPG, etc.)');
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setError('Image too large. Please use an image under 10MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const base64 = evt.target?.result as string;
+      setImagePreview(base64);
+      setUploadedImage(base64.split(',')[1]);
+      setError(null);
+    };
+    reader.onerror = () => {
+      setError('Failed to read image file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleImageSubmit = async () => {
     if (!uploadedImage) {
       setError('Please upload an image first.');
@@ -258,7 +296,7 @@ function App() {
       setHistorySessions(await getHistory());
     }
     setState('solution');
-    setPracticeQuestions([]);
+    // Don't clear practiceQuestions - keep them for Review Quiz button
   };
 
   const handleDeleteSession = async (sessionId: string) => {
@@ -341,6 +379,8 @@ function App() {
           practiceLoading={practiceLoading}
           initialSubSteps={currentSubSteps}
           onSubStepsChange={handleSubStepsChange}
+          hasStoredQuiz={practiceQuestions.length > 0}
+          onReviewQuiz={() => setState('practice')}
         />
       );
     }
@@ -412,9 +452,9 @@ function App() {
               <Button
                 onClick={handleTextSubmit}
                 disabled={!textInput.trim()}
-                className="w-full"
+                className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/20"
               >
-                Solve Problem
+                Analyze & Explain
               </Button>
             </CardContent>
           </Card>
@@ -440,25 +480,27 @@ function App() {
 
               {/* Upload zone or preview */}
               {imagePreview ? (
-                <div className="relative">
+                <div className="relative group">
                   <img
                     src={imagePreview}
                     alt="Uploaded problem"
-                    className="w-full rounded-lg border border-muted max-h-48 object-contain bg-slate-900"
+                    className="w-full rounded-lg border border-slate-700 max-h-48 object-contain bg-slate-900"
                   />
-                  <Button
-                    variant="destructive"
-                    size="icon"
-                    className="absolute top-2 right-2 h-8 w-8"
+                  {/* Elegant small X button */}
+                  <button
                     onClick={clearImage}
+                    className="absolute top-1 right-1 h-5 w-5 rounded-full bg-slate-800/80 hover:bg-red-500 text-slate-400 hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
                   >
-                    <X className="h-4 w-4" />
-                  </Button>
+                    <X className="h-3 w-3" />
+                  </button>
                 </div>
               ) : (
                 <div
                   className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-muted rounded-lg cursor-pointer hover:border-primary/50 transition-colors"
                   onClick={() => fileInputRef.current?.click()}
+                  onDragOver={handleDragOver}
+                  onDragEnter={handleDragOver}
+                  onDrop={handleFileDrop}
                 >
                   <ImageIcon className="h-12 w-12 text-muted-foreground mb-4" />
                   <p className="text-sm text-muted-foreground text-center mb-2">
@@ -473,11 +515,11 @@ function App() {
               <Button
                 onClick={handleImageSubmit}
                 disabled={!uploadedImage}
-                className="w-full"
+                className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/20"
                 size="lg"
               >
                 <Upload className="h-4 w-4 mr-2" />
-                Solve Problem
+                Analyze & Explain
               </Button>
             </CardContent>
           </Card>

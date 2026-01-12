@@ -52,13 +52,19 @@ export function PracticeView({ topic, questions, onBack, onMoreQuestions, loadin
     const [showResult, setShowResult] = useState(false);
     const [score, setScore] = useState(0);
     const [completed, setCompleted] = useState(false);
+    const [focusedOption, setFocusedOption] = useState<number | null>(null); // For exploring options after answer
 
     const question = questions[currentQuestion];
 
     const handleAnswer = (index: number) => {
-        if (showResult) return; // Already answered
+        if (showResult) {
+            // After answering, allow clicking to focus on different options
+            setFocusedOption(index);
+            return;
+        }
         setSelectedAnswer(index);
         setShowResult(true);
+        setFocusedOption(index); // Focus on selected by default
         if (index === question.correct_index) {
             setScore(s => s + 1);
         }
@@ -69,6 +75,7 @@ export function PracticeView({ topic, questions, onBack, onMoreQuestions, loadin
             setCurrentQuestion(c => c + 1);
             setSelectedAnswer(null);
             setShowResult(false);
+            setFocusedOption(null);
         } else {
             setCompleted(true);
         }
@@ -151,26 +158,30 @@ export function PracticeView({ topic, questions, onBack, onMoreQuestions, loadin
                         <TextWithMath text={question.question} />
                     </p>
 
-                    {/* Options */}
+                    {/* Options - clickable to explore after answering */}
                     <div className="space-y-2">
                         {question.options.map((option, index) => {
                             const isSelected = selectedAnswer === index;
                             const isCorrect = index === question.correct_index;
                             const showCorrect = showResult && isCorrect;
                             const showIncorrect = showResult && isSelected && !isCorrect;
+                            const isFocused = showResult && focusedOption === index;
 
                             return (
                                 <button
                                     key={index}
                                     onClick={() => handleAnswer(index)}
-                                    disabled={showResult}
                                     className={`w-full text-left p-3 rounded-lg border transition-all flex items-center gap-3 ${showCorrect
                                         ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
                                         : showIncorrect
                                             ? 'bg-red-500/20 border-red-500 text-red-300'
-                                            : isSelected
-                                                ? 'bg-blue-500/20 border-blue-500'
-                                                : 'bg-slate-800/50 border-slate-700 hover:border-slate-500'
+                                            : showResult && isFocused
+                                                ? 'bg-slate-700/50 border-slate-500 ring-1 ring-slate-400'
+                                                : showResult
+                                                    ? 'bg-slate-800/30 border-slate-700/50 text-slate-400 hover:border-slate-500 cursor-pointer'
+                                                    : isSelected
+                                                        ? 'bg-blue-500/20 border-blue-500'
+                                                        : 'bg-slate-800/50 border-slate-700 hover:border-slate-500'
                                         }`}
                                 >
                                     <span className="flex-shrink-0 h-6 w-6 rounded-full border border-current flex items-center justify-center text-xs font-bold">
@@ -186,13 +197,33 @@ export function PracticeView({ topic, questions, onBack, onMoreQuestions, loadin
                         })}
                     </div>
 
-                    {/* Explanation after answer */}
-                    {showResult && (
-                        <div className={`mt-4 p-3 rounded-lg ${selectedAnswer === question.correct_index ? 'bg-emerald-500/10' : 'bg-amber-500/10'}`}>
-                            <p className="text-sm">
-                                <span className="font-medium">{selectedAnswer === question.correct_index ? '✓ Correct! ' : '✗ Incorrect. '}</span>
-                                <TextWithMath text={question.explanation} />
-                            </p>
+                    {/* Explanation - shows for focused option */}
+                    {showResult && focusedOption !== null && (
+                        <div className="mt-3 animate-in slide-in-from-top-2 duration-200">
+                            <div className={`flex items-start gap-2 text-sm ${focusedOption === question.correct_index ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                <span className="flex-shrink-0 text-xs font-bold mt-0.5">
+                                    {focusedOption === question.correct_index ? '✓' : '✗'}
+                                </span>
+                                <p className="text-slate-300 leading-relaxed">
+                                    <span className="text-slate-500 mr-1">Option {String.fromCharCode(65 + focusedOption)}:</span>
+                                    <span className={`font-medium ${focusedOption === question.correct_index ? 'text-emerald-400' : 'text-red-400'}`}>
+                                        {focusedOption === question.correct_index ? 'Correct! ' : 'Incorrect. '}
+                                    </span>
+                                    {focusedOption === question.correct_index ? (
+                                        <TextWithMath text={question.explanation} />
+                                    ) : (
+                                        <span className="text-slate-400">
+                                            This is not the right answer. The correct answer is option {String.fromCharCode(65 + question.correct_index)}.
+                                        </span>
+                                    )}
+                                </p>
+                            </div>
+                            {/* Hint to explore other options */}
+                            {focusedOption === selectedAnswer && (
+                                <p className="text-xs text-slate-500 mt-2 ml-4">
+                                    💡 Click other options to see why they&apos;re wrong
+                                </p>
+                            )}
                         </div>
                     )}
                 </CardContent>
