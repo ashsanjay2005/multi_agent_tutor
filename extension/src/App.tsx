@@ -12,7 +12,7 @@ import { HistoryView } from './components/HistoryView';
 import { Upload, X, Sparkles, Pin } from 'lucide-react';
 import { analyzeProblem, resumeWorkflow, generatePractice, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
-import { saveSession, getHistory, deleteSession, clearHistory, updateSession, type HistorySession } from './lib/storage';
+import { saveSession, getHistory, deleteSession, clearHistory, updateSession, getFolders, createFolder, deleteFolder as deleteFolderStorage, moveToFolder, batchMoveToFolder, batchMarkReviewed, batchDeleteSessions, type HistorySession, type Folder } from './lib/storage';
 import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep } from './lib/types';
 
 type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'history' | 'error';
@@ -29,14 +29,16 @@ function App() {
   const [practiceQuestions, setPracticeQuestions] = useState<PracticeQuestion[]>([]);
   const [practiceLoading, setPracticeLoading] = useState(false);
   const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentSubSteps, setCurrentSubSteps] = useState<Record<string, SubStep[]>>({});
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load history on mount
+  // Load history and folders on mount
   useEffect(() => {
     getHistory().then(setHistorySessions);
+    getFolders().then(setFolders);
   }, []);
 
   const handleAnalyze = async (type: InputType, content: string) => {
@@ -213,6 +215,7 @@ function App() {
 
   const handleReset = () => {
     setState('idle');
+    setActiveTab('paste');
     setTextInput('');
     setError(null);
     setResponse(null);
@@ -405,9 +408,40 @@ function App() {
       return (
         <HistoryView
           sessions={historySessions}
+          folders={folders}
           onDelete={handleDeleteSession}
           onClearAll={handleClearHistory}
           onSelectSession={handleSelectSession}
+          onCreateFolder={async (name, color) => {
+            const newFolder = await createFolder(name, color);
+            setFolders(prev => [...prev, newFolder]);
+          }}
+          onDeleteFolder={async (folderId) => {
+            await deleteFolderStorage(folderId);
+            setFolders(prev => prev.filter(f => f.id !== folderId));
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
+          onMoveToFolder={async (sessionId, folderId) => {
+            await moveToFolder(sessionId, folderId);
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
+          onBatchMove={async (sessionIds, folderId) => {
+            await batchMoveToFolder(sessionIds, folderId);
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
+          onBatchMarkReviewed={async (sessionIds, reviewed) => {
+            await batchMarkReviewed(sessionIds, reviewed);
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
+          onBatchDelete={async (sessionIds) => {
+            await batchDeleteSessions(sessionIds);
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
         />
       );
     }
@@ -577,6 +611,7 @@ Example: Solve for x: 2x + 5 = 13"
                 Pin
               </button>
             )}
+            {/* Back button - visible when not idle */}
             {state !== 'idle' && (
               <Button
                 variant="ghost"
@@ -584,15 +619,11 @@ Example: Solve for x: 2x + 5 = 13"
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (state === 'history') {
-                    setShowResetConfirm(true);
-                  } else {
-                    handleReset();
-                  }
+                  handleReset();
                 }}
                 className="text-slate-400 hover:text-white"
               >
-                Reset
+                Back
               </Button>
             )}
           </div>
@@ -626,7 +657,6 @@ Example: Solve for x: 2x + 5 = 13"
                 onClick={() => {
                   clearHistory();
                   setHistorySessions([]);
-                  setState('idle');
                   setShowResetConfirm(false);
                 }}
                 className="bg-red-600 hover:bg-red-700"
