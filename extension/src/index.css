@@ -31,6 +31,7 @@
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
@@ -55,7 +56,16 @@
   background: hsl(var(--primary));
 }
 
-/* Thin scrollbar for math containers */
+/* KaTeX display math - left align */
+.katex-display {
+  text-align: left !important;
+}
+
+.katex-display>.katex {
+  text-align: left !important;
+}
+
+/* Math container styling */
 .math-scroll-container::-webkit-scrollbar {
   height: 4px;
 }
@@ -71,4 +81,206 @@
 
 .math-scroll-container::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.6);
+}
+
+/* ============================================
+   STEPWISE UI DESIGN SYSTEM
+   ============================================ */
+
+/* Floating Header Bar */
+.stepwise-header {
+  background: linear-gradient(135deg, rgba(30, 35, 45, 0.95) 0%, rgba(25, 30, 40, 0.95) 100%);
+  backdrop-filter: blur(10px);
+  border-radius: 1rem;
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* Glowing Border Effect */
+.glow-border {
+  position: relative;
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 0.75rem;
+  background: rgba(15, 20, 30, 0.8);
+  box-shadow:
+    0 0 15px rgba(99, 102, 241, 0.15),
+    0 0 30px rgba(99, 102, 241, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: all 0.3s ease;
+}
+
+.glow-border:focus-within {
+  border-color: rgba(99, 102, 241, 0.8);
+  box-shadow:
+    0 0 20px rgba(99, 102, 241, 0.3),
+    0 0 40px rgba(99, 102, 241, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Gradient Button */
+.gradient-button {
+  background: linear-gradient(135deg, #8B5CF6 0%, #EC4899 50%, #8B5CF6 100%);
+  background-size: 200% 200%;
+  animation: gradient-shift 3s ease infinite;
+  border: none;
+  border-radius: 0.75rem;
+  color: white;
+  font-weight: 600;
+  padding: 0.75rem 1.5rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+}
+
+.gradient-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(139, 92, 246, 0.4);
+}
+
+@keyframes gradient-shift {
+
+  0%,
+  100% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+/* Timeline Styles */
+.timeline-container {
+  position: relative;
+  padding-left: 2rem;
+  overflow: visible;
+}
+
+.timeline-line {
+  position: absolute;
+  left: 0.5rem;
+  top: 1.5rem;
+  bottom: 1rem;
+  width: 2px;
+  background: linear-gradient(to bottom, rgba(99, 102, 241, 0.5), rgba(99, 102, 241, 0.1));
+}
+
+.timeline-dot {
+  position: absolute;
+  left: 0;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.6);
+  border: 2px solid rgba(99, 102, 241, 0.8);
+  transition: all 0.3s ease;
+  z-index: 10;
+}
+
+.timeline-dot.active {
+  width: 0.875rem;
+  height: 0.875rem;
+  background: linear-gradient(135deg, #6366F1, #8B5CF6);
+  border-color: #8B5CF6;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.4);
+}
+
+.timeline-dot.small {
+  width: 0.625rem;
+  height: 0.625rem;
+  left: 0.0625rem;
+  background: rgba(99, 102, 241, 0.5);
+  border: 1px solid rgba(99, 102, 241, 0.7);
+}
+
+/* Underlined Tabs */
+.underline-tabs {
+  display: flex;
+  gap: 1.5rem;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.2);
+  padding-bottom: 0.5rem;
+}
+
+.underline-tab {
+  color: rgba(148, 163, 184, 0.7);
+  font-size: 0.875rem;
+  cursor: pointer;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.underline-tab.active {
+  color: white;
+  border-bottom-color: #6366F1;
+}
+
+.underline-tab:hover:not(.active) {
+  color: rgba(148, 163, 184, 1);
+}
+
+/* Topic Badge */
+.topic-badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(59, 130, 246, 0.2));
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  color: rgba(134, 239, 172, 0.9);
+}
+
+/* Math Box with Copy */
+.math-box {
+  background: rgba(30, 35, 45, 0.8);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  position: relative;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+
+.math-box .copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.math-box:hover .copy-btn {
+  opacity: 1;
+}
+
+/* General Solution Box */
+.solution-box {
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.solution-box-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: rgba(134, 239, 172, 1);
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+}
+
+/* Action Links */
+.action-link {
+  color: rgba(148, 163, 184, 0.7);
+  text-decoration: underline;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.action-link:hover {
+  color: rgba(99, 102, 241, 1);
 }

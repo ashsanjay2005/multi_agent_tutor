@@ -46,26 +46,76 @@ function getSemanticTag(label: string): string {
   return SEMANTIC_TAGS[hash % SEMANTIC_TAGS.length];
 }
 
+// Check if text looks like an equation (contains math-like patterns)
+function looksLikeEquation(text: string): boolean {
+  // Patterns that indicate an equation
+  const equationPatterns = [
+    /[a-zA-Z]_[a-zA-Z0-9]+\s*=/, // Variable with subscript followed by =
+    /[a-zA-Z]\^\{?[-a-zA-Z0-9/]+\}?/, // Exponent notation like p^{-1/2}
+    /\\frac\{/, // Fraction
+    /\\sqrt\{/, // Square root
+    /\\int|\\sum|\\prod/, // Integrals, sums, products
+    /\([^)]+\)\^/, // Expression raised to power
+    /[a-zA-Z]\s*=\s*[^,]+[+\-*/^]/, // Variable equals expression with operators
+    /\d+\s*[+\-*/]\s*\d+\s*=/, // Arithmetic equation
+    /\d+!/, // Factorial notation like 16!
+    /\|[^|]+\|/, // Absolute value |...|
+    /\d+\s*\*\s*\(/, // Number times parenthesis like 2 * (
+    /\/\s*\(/, // Division with parenthesis
+    /[a-zA-Z]\^\{/, // Variable with exponent braces
+    /\(\s*\d+!\s*[*/]/, // Factorial in expression
+  ];
+
+  return equationPatterns.some(pattern => pattern.test(text));
+}
+
 // Parse text and render inline LaTeX ($...$) and display LaTeX ($$...$$)
 function renderLatexInText(text: string): string {
   if (!text) return '';
 
-  // First handle display math ($$...$$) - add block spacing
-  let result = text.replace(/\$\$([^$]+)\$\$/g, (_, latex) => {
+  // Handle display math \[...\] - add block spacing
+  let result = text.replace(/\\\[([^\]]+)\\\]/g, (_, latex) => {
     try {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
         displayMode: true,
         trust: true,
       });
-      // Wrap in div with vertical margin for spacing
-      return `<div style="margin: 16px 0; text-align: center;">${rendered}</div>`;
+      return `<div style="margin: 16px 0; text-align: left;">${rendered}</div>`;
     } catch (e) {
       return `<code>${latex}</code>`;
     }
   });
 
-  // Then handle inline math ($...$) - add small horizontal spacing
+  // Handle display math ($$...$$) - add block spacing
+  result = result.replace(/\$\$([^$]+)\$\$/g, (_, latex) => {
+    try {
+      const rendered = katex.renderToString(latex.trim(), {
+        throwOnError: false,
+        displayMode: true,
+        trust: true,
+      });
+      return `<div style="margin: 16px 0; text-align: left;">${rendered}</div>`;
+    } catch (e) {
+      return `<code>${latex}</code>`;
+    }
+  });
+
+  // Handle inline math \(...\) - add small horizontal spacing
+  result = result.replace(/\\\(([^)]+)\\\)/g, (_, latex) => {
+    try {
+      const rendered = katex.renderToString(latex.trim(), {
+        throwOnError: false,
+        displayMode: false,
+        trust: true,
+      });
+      return `<span style="margin: 0 2px;">${rendered}</span>`;
+    } catch (e) {
+      return `<code>${latex}</code>`;
+    }
+  });
+
+  // Handle inline math ($...$) - add small horizontal spacing
   result = result.replace(/\$([^$]+)\$/g, (_, latex) => {
     try {
       const rendered = katex.renderToString(latex.trim(), {
@@ -73,12 +123,26 @@ function renderLatexInText(text: string): string {
         displayMode: false,
         trust: true,
       });
-      // Add small margin around inline math
       return `<span style="margin: 0 2px;">${rendered}</span>`;
     } catch (e) {
       return `<code>${latex}</code>`;
     }
   });
+
+  // If no $ delimiters were found but text looks like equation, try to render it
+  if (!text.includes('$') && looksLikeEquation(result)) {
+    try {
+      const rendered = katex.renderToString(result.trim(), {
+        throwOnError: false,
+        displayMode: false,
+        trust: true,
+      });
+      return `<span style="margin: 0 2px;">${rendered}</span>`;
+    } catch (e) {
+      // If KaTeX fails, return original text
+      return result;
+    }
+  }
 
   return result;
 }
@@ -243,221 +307,228 @@ export function SolutionView({
 
   // Render step-by-step solution
   if (solutionSteps && solutionSteps.length > 0) {
+    // Extract topic parts for better display
+    const topicParts = topic?.split(' - ') || [];
+    const mainTopic = topicParts[topicParts.length - 1] || 'Solution';
+    const categoryBadge = topicParts.length > 1 ? topicParts.slice(0, -1).join(' · ') : null;
+
     return (
-      <div className="space-y-3">
-        {/* Topic Header */}
+      <div className="space-y-4">
+        {/* Topic Header with Badge */}
         {topic && (
-          <div className="pb-2 border-b border-slate-700">
-            <h2 className="font-semibold text-base text-blue-400">{topic.split(' - ').pop()}</h2>
-            <p className="text-xs text-slate-400">Step-by-step solution</p>
+          <div className="space-y-1">
+            <h2 className="font-bold text-xl text-white">{mainTopic}</h2>
+            {categoryBadge && (
+              <span className="topic-badge">{categoryBadge}</span>
+            )}
           </div>
         )}
 
-        {/* Solution Steps */}
-        <div className="space-y-2">
-          {solutionSteps.map((step) => {
-            const isExpanded = expandedStep === step.step_number;
-            const stepPath = String(step.step_number);
+        {/* Solution Steps - Timeline Container */}
+        <div className="timeline-container">
+          {/* Vertical Timeline Line */}
+          <div className="timeline-line"></div>
 
-            return (
-              <div key={step.step_number} className="relative">
-                {/* Step Header - Elevated card style */}
-                <button
-                  onClick={() => toggleStep(step.step_number)}
-                  className={`w-full text-left p-4 rounded-xl transition-all flex items-start gap-3 ${isExpanded
-                    ? 'bg-slate-800/80 shadow-lg shadow-blue-500/5 ring-1 ring-blue-500/20'
-                    : 'bg-slate-800/40 hover:bg-slate-800/60 shadow-md'
-                    }`}
-                >
-                  {/* Step number badge */}
-                  <div className={`flex-shrink-0 h-7 w-7 rounded-lg flex items-center justify-center text-xs font-bold transition-all ${isExpanded
-                    ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white shadow-md shadow-blue-500/30'
-                    : 'bg-slate-700/80 text-slate-300'
-                    }`}>
-                    {step.step_number}
-                  </div>
+          <div className="space-y-3">
+            {solutionSteps.map((step) => {
+              const isExpanded = expandedStep === step.step_number;
+              const stepPath = String(step.step_number);
 
-                  <div className="flex-1 min-w-0">
-                    <span className={`font-medium text-sm leading-tight ${isExpanded ? 'text-white' : 'text-slate-200'}`}>
-                      {step.title}
-                    </span>
-                  </div>
-
-                  <div className={`flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}>
-                    <ChevronDown className={`h-4 w-4 ${isExpanded ? 'text-blue-400' : 'text-slate-500'}`} />
-                  </div>
-                </button>
-
-                {/* Expanded Content - Clean spatial hierarchy */}
-                {isExpanded && (
-                  <div className="mt-2 ml-4 pl-6 border-l border-slate-700/50">
-                    {/* Explanation with inline LaTeX */}
-                    <div className="text-sm text-slate-300 leading-relaxed py-3">
-                      <TextWithMath text={step.explanation} />
+              return (
+                <div key={step.step_number} className="relative">
+                  {/* Step Header */}
+                  <button
+                    onClick={() => toggleStep(step.step_number)}
+                    className={`w-full text-left py-3 transition-all ${isExpanded ? '' : 'opacity-80 hover:opacity-100'}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`font-medium text-sm ${isExpanded ? 'text-white' : 'text-slate-300'}`}>
+                        {step.step_number}. {step.title}
+                      </span>
+                      <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180 text-indigo-400' : 'text-slate-500'}`} />
                     </div>
-
-                    {/* Display Math Expression */}
-                    {step.math_expression && (
-                      <MathDisplay latex={step.math_expression} />
-                    )}
-
-                    {/* Sub-steps (if expanded) with fading hierarchy */}
-                    {subStepsMap[stepPath] && (() => {
-                      const depth2Style = getHierarchyLineStyle(2);
-                      return (
-                        <div
-                          className="mt-4 space-y-4 pl-4"
-                          style={{
-                            borderLeftWidth: depth2Style.width,
-                            borderLeftStyle: 'solid',
-                            borderLeftColor: `rgba(100, 116, 139, ${depth2Style.opacity})`
-                          }}
-                        >
-                          {subStepsMap[stepPath].map((sub) => {
-                            const subDepth = stepPath.split('.').length + 1;
-                            const useSemanticLabel = subDepth >= 3;
-
-                            return (
-                              <div key={sub.id} className="text-xs bg-slate-800/30 rounded-lg p-3">
-                                {/* Label: numeric or semantic */}
-                                <div className="font-medium mb-2 flex items-center gap-2">
-                                  {useSemanticLabel ? (
-                                    <>
-                                      <span className="px-2 py-0.5 rounded-md text-[10px] bg-indigo-500/15 text-indigo-300 font-medium">
-                                        {getSemanticTag(sub.label)}
-                                      </span>
-                                      <span className="text-slate-200">{sub.title}</span>
-                                    </>
-                                  ) : (
-                                    <span className="text-slate-200">
-                                      <span className="text-blue-400 font-semibold">{sub.label}</span>: {sub.title}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-slate-400 leading-relaxed">
-                                  <TextWithMath text={sub.explanation} />
-                                </div>
-                                {sub.math_expression && (
-                                  <div className="ml-1 mt-1">
-                                    <MathDisplay latex={sub.math_expression} depth={subDepth} />
-                                  </div>
-                                )}
-                                {/* Recursive expand for sub-steps */}
-                                {sub.can_expand && !subStepsMap[sub.label] && !stopReasons[sub.label] && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="h-6 px-2 mt-1.5 text-xs text-slate-400 hover:text-blue-300"
-                                    onClick={() => handleExpandStep(
-                                      sub.id,
-                                      sub.label,
-                                      sub,
-                                      stepPath.split('.').length
-                                    )}
-                                    disabled={expandingPath === sub.label}
-                                  >
-                                    {expandingPath === sub.label ? (
-                                      <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Expanding...</>
-                                    ) : (
-                                      <><Layers className="h-3 w-3 mr-1" /> Break down</>
-                                    )}
-                                  </Button>
-                                )}
-                                {/* Show stop reason for sub-step */}
-                                {stopReasons[sub.label] && (
-                                  <div className="ml-1 mt-1 text-xs text-amber-400/70">
-                                    {stopReasons[sub.label].message}
-                                  </div>
-                                )}
-                                {/* Show nested sub-steps (depth 3+) with fading lines */}
-                                {subStepsMap[sub.label] && (() => {
-                                  const depth3Style = getHierarchyLineStyle(3);
-                                  return (
-                                    <div
-                                      className="mt-2 ml-1 space-y-2 pl-3"
-                                      style={{
-                                        borderLeftWidth: depth3Style.width,
-                                        borderLeftStyle: 'solid',
-                                        borderLeftColor: `rgba(59, 130, 246, ${depth3Style.opacity})`
-                                      }}
-                                    >
-                                      {subStepsMap[sub.label].map(nested => (
-                                        <div key={nested.id} className="text-xs">
-                                          {/* Semantic label for depth 3+ */}
-                                          <div className="flex items-center gap-2 mb-1">
-                                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-300/80 font-normal">
-                                              {getSemanticTag(nested.label)}
-                                            </span>
-                                            <span className="text-slate-400">{nested.title}</span>
-                                          </div>
-                                          <div className="text-slate-500 ml-1">
-                                            <TextWithMath text={nested.explanation} />
-                                          </div>
-                                          {nested.math_expression && (
-                                            <div className="ml-1 mt-1">
-                                              <MathDisplay latex={nested.math_expression} depth={3} />
-                                            </div>
-                                          )}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  );
-                                })()}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
-
-                    {/* Stop reason message */}
-                    {stopReasons[stepPath] && (
-                      <div className="mt-2 text-xs text-amber-400/70 flex items-center gap-1">
-                        <span>⚠</span> {stopReasons[stepPath].message}
+                    {/* Collapsed preview - show math expression if available */}
+                    {!isExpanded && step.math_expression && (
+                      <div className="mt-2 py-2 px-3 bg-slate-800/50 rounded-lg">
+                        <MathDisplay latex={step.math_expression} />
                       </div>
                     )}
+                  </button>
 
-                    {/* Break Down Button - only if no sub-steps yet and no stop reason */}
-                    {!subStepsMap[stepPath] && !stopReasons[stepPath] && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="mt-3 h-7 text-xs text-slate-400 hover:text-blue-300 border border-slate-700 hover:border-blue-500/50"
-                        onClick={() => handleExpandStep(
-                          step.id || `step-${step.step_number}`,
-                          stepPath,
-                          step,
-                          0
-                        )}
-                        disabled={expandingPath === stepPath}
-                      >
-                        {expandingPath === stepPath ? (
-                          <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Breaking down...</>
-                        ) : (
-                          <><Layers className="h-3 w-3 mr-1" /> Break down this step</>
-                        )}
-                      </Button>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  {/* Expanded Content - Clean spatial hierarchy */}
+                  {isExpanded && (
+                    <div className="mt-2 ml-4 pl-6 border-l border-slate-700/50">
+                      {/* Explanation with inline LaTeX */}
+                      <div className="text-sm text-slate-300 leading-relaxed py-3">
+                        <TextWithMath text={step.explanation} />
+                      </div>
+
+                      {/* Display Math Expression */}
+                      {step.math_expression && (
+                        <MathDisplay latex={step.math_expression} />
+                      )}
+
+                      {/* Sub-steps (if expanded) with fading hierarchy */}
+                      {subStepsMap[stepPath] && (() => {
+                        const depth2Style = getHierarchyLineStyle(2);
+                        return (
+                          <div
+                            className="mt-4 space-y-4 pl-4"
+                            style={{
+                              borderLeftWidth: depth2Style.width,
+                              borderLeftStyle: 'solid',
+                              borderLeftColor: `rgba(100, 116, 139, ${depth2Style.opacity})`
+                            }}
+                          >
+                            {subStepsMap[stepPath].map((sub) => {
+                              const subDepth = stepPath.split('.').length + 1;
+                              const useSemanticLabel = subDepth >= 3;
+
+                              return (
+                                <div key={sub.id} className="text-xs bg-slate-800/30 rounded-lg p-3">
+                                  {/* Label: numeric or semantic */}
+                                  <div className="font-medium mb-2 flex items-center gap-2">
+                                    {useSemanticLabel ? (
+                                      <>
+                                        <span className="px-2 py-0.5 rounded-md text-[10px] bg-indigo-500/15 text-indigo-300 font-medium">
+                                          {getSemanticTag(sub.label)}
+                                        </span>
+                                        <span className="text-slate-200">{sub.title}</span>
+                                      </>
+                                    ) : (
+                                      <span className="text-slate-200">
+                                        <span className="text-blue-400 font-semibold">{sub.label}</span>: {sub.title}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-slate-400 leading-relaxed">
+                                    <TextWithMath text={sub.explanation} />
+                                  </div>
+                                  {sub.math_expression && (
+                                    <div className="ml-1 mt-1">
+                                      <MathDisplay latex={sub.math_expression} depth={subDepth} />
+                                    </div>
+                                  )}
+                                  {/* Recursive expand for sub-steps */}
+                                  {sub.can_expand && !subStepsMap[sub.label] && !stopReasons[sub.label] && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="h-6 px-2 mt-1.5 text-xs text-slate-400 hover:text-blue-300"
+                                      onClick={() => handleExpandStep(
+                                        sub.id,
+                                        sub.label,
+                                        sub,
+                                        stepPath.split('.').length
+                                      )}
+                                      disabled={expandingPath === sub.label}
+                                    >
+                                      {expandingPath === sub.label ? (
+                                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Expanding...</>
+                                      ) : (
+                                        <><Layers className="h-3 w-3 mr-1" /> Break down</>
+                                      )}
+                                    </Button>
+                                  )}
+                                  {/* Show stop reason for sub-step */}
+                                  {stopReasons[sub.label] && (
+                                    <div className="ml-1 mt-1 text-xs text-amber-400/70">
+                                      {stopReasons[sub.label].message}
+                                    </div>
+                                  )}
+                                  {/* Show nested sub-steps (depth 3+) with fading lines */}
+                                  {subStepsMap[sub.label] && (() => {
+                                    const depth3Style = getHierarchyLineStyle(3);
+                                    return (
+                                      <div
+                                        className="mt-2 ml-1 space-y-2 pl-3"
+                                        style={{
+                                          borderLeftWidth: depth3Style.width,
+                                          borderLeftStyle: 'solid',
+                                          borderLeftColor: `rgba(59, 130, 246, ${depth3Style.opacity})`
+                                        }}
+                                      >
+                                        {subStepsMap[sub.label].map(nested => (
+                                          <div key={nested.id} className="text-xs">
+                                            {/* Semantic label for depth 3+ */}
+                                            <div className="flex items-center gap-2 mb-1">
+                                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/15 text-purple-300/80 font-normal">
+                                                {getSemanticTag(nested.label)}
+                                              </span>
+                                              <span className="text-slate-400">{nested.title}</span>
+                                            </div>
+                                            <div className="text-slate-500 ml-1">
+                                              <TextWithMath text={nested.explanation} />
+                                            </div>
+                                            {nested.math_expression && (
+                                              <div className="ml-1 mt-1">
+                                                <MathDisplay latex={nested.math_expression} depth={3} />
+                                              </div>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Stop reason message */}
+                      {stopReasons[stepPath] && (
+                        <div className="mt-2 text-xs text-amber-400/70 flex items-center gap-1">
+                          <span>⚠</span> {stopReasons[stepPath].message}
+                        </div>
+                      )}
+
+                      {/* Break Down Button - only if no sub-steps yet and no stop reason */}
+                      {!subStepsMap[stepPath] && !stopReasons[stepPath] && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="mt-3 h-7 text-xs text-slate-400 hover:text-blue-300 border border-slate-700 hover:border-blue-500/50"
+                          onClick={() => handleExpandStep(
+                            step.id || `step-${step.step_number}`,
+                            stepPath,
+                            step,
+                            0
+                          )}
+                          disabled={expandingPath === stepPath}
+                        >
+                          {expandingPath === stepPath ? (
+                            <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Breaking down...</>
+                          ) : (
+                            <><Layers className="h-3 w-3 mr-1" /> Break down this step</>
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Final Answer - Clean, subtle success styling */}
+        {/* Final Answer - Green Solution Box */}
         {finalAnswer && (
-          <div className="mt-6 pt-4 border-t border-slate-700/50">
-            <div className="flex items-start gap-3">
-              <div className="flex-shrink-0 h-6 w-6 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-slate-500 font-medium mb-1">Final Answer</p>
-                <div className="text-sm text-slate-200 leading-relaxed">
-                  <TextWithMath text={finalAnswer} />
-                </div>
-              </div>
+          <div className="solution-box mt-4">
+            <div className="solution-box-header">
+              <CheckCircle2 className="h-4 w-4" />
+              <span>General Solution</span>
+            </div>
+            {/* Render with TextWithMath to handle mixed text and equations */}
+            <div className="text-sm text-slate-200 leading-relaxed">
+              <TextWithMath text={finalAnswer} />
+            </div>
+            {/* Action Links */}
+            <div className="flex gap-4 mt-3">
+              <button className="action-link" onClick={copyToClipboard}>[Copy LaTeX]</button>
+              <button className="action-link">[Graph It]</button>
+              <button className="action-link">[Verify]</button>
             </div>
           </div>
         )}

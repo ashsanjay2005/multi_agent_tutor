@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "AI Math Tutor",
+  "name": "Stepwise",
   "version": "0.1.0",
   "description": "AI-powered math tutor that solves problems from screenshots or text",
   "icons": {
@@ -16,10 +16,17 @@
       "128": "icons/icon-128.png"
     }
   },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "sidePanel"
   ],
   "host_permissions": [
     "http://localhost:8000/*"

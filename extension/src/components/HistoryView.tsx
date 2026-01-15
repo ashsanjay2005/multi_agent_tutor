@@ -1,7 +1,5 @@
 import { useState } from 'react';
-import { Card, CardContent } from './ui/card';
-import { Button } from './ui/button';
-import { ChevronDown, ChevronUp, Trash2, Clock, BookOpen, Trophy } from 'lucide-react';
+import { ChevronDown, Trash2, BookOpen } from 'lucide-react';
 import type { HistorySession } from '../lib/storage';
 
 interface HistoryViewProps {
@@ -44,7 +42,7 @@ function truncate(text: string, maxLength: number): string {
 }
 
 export function HistoryView({ sessions, onDelete, onClearAll, onSelectSession }: HistoryViewProps) {
-    const [expandedId, setExpandedId] = useState<string | null>(null);
+    const [selectedId, setSelectedId] = useState<string | null>(null);
 
     if (sessions.length === 0) {
         return (
@@ -59,132 +57,89 @@ export function HistoryView({ sessions, onDelete, onClearAll, onSelectSession }:
     }
 
     return (
-        <div className="space-y-3">
+        <div className="space-y-4">
             {/* Header */}
-            <div className="flex items-center justify-between pb-2 border-b border-slate-700">
-                <div>
-                    <h2 className="font-semibold text-base text-blue-400">History</h2>
-                    <p className="text-xs text-slate-400">{sessions.length} solved problem{sessions.length !== 1 ? 's' : ''}</p>
-                </div>
-                <Button
-                    variant="ghost"
-                    size="sm"
+            <div className="flex items-center justify-between">
+                <h2 className="font-bold text-xl text-white">History</h2>
+                <button
                     onClick={onClearAll}
-                    className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-600 text-slate-400 hover:text-red-400 hover:border-red-500/50 text-xs transition-colors"
                 >
-                    <Trash2 className="h-4 w-4 mr-1" />
                     Clear All
-                </Button>
+                    <Trash2 className="h-3.5 w-3.5" />
+                </button>
             </div>
 
-            {/* Session List */}
-            <div className="space-y-2 max-h-[400px] overflow-y-auto pr-1">
-                {sessions.map((session) => {
-                    const isExpanded = expandedId === session.id;
-                    const topicShort = session.topic.split(' - ').pop() || session.topic;
+            {/* Timeline Container */}
+            <div className="timeline-container">
+                {/* Vertical Timeline Line */}
+                <div className="timeline-line"></div>
 
-                    return (
-                        <Card
-                            key={session.id}
-                            className={`transition-all cursor-pointer ${isExpanded ? 'border-blue-500/50' : 'border-slate-700 hover:border-slate-600'
-                                }`}
-                        >
-                            <CardContent className="p-3">
-                                {/* Header row */}
+                <div className="space-y-3 overflow-y-auto pr-1" style={{ maxHeight: 'calc(100vh - 180px)' }}>
+                    {sessions.map((session) => {
+                        const isSelected = selectedId === session.id;
+                        const topicShort = session.topic.split(' - ').pop() || session.topic;
+
+                        return (
+                            <div key={session.id}>
+                                {/* Card */}
                                 <div
-                                    className="flex items-start gap-3"
-                                    onClick={() => setExpandedId(isExpanded ? null : session.id)}
+                                    onClick={() => setSelectedId(isSelected ? null : session.id)}
+                                    className={`cursor-pointer rounded-xl p-4 transition-all ${isSelected
+                                        ? 'glow-border'
+                                        : 'bg-slate-800/40 hover:bg-slate-800/60'
+                                        }`}
                                 >
-                                    {/* Topic badge */}
-                                    <div className="flex-shrink-0 px-2 py-1 bg-blue-500/20 rounded text-xs font-medium text-blue-400">
-                                        {truncate(topicShort, 20)}
+                                    {/* Topic Badge */}
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className={`inline-block px-2 py-0.5 rounded-md text-xs font-medium ${isSelected
+                                            ? 'topic-badge'
+                                            : 'bg-slate-700/60 text-slate-400'
+                                            }`}>
+                                            {truncate(topicShort, 22)}
+                                        </span>
+                                        <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${isSelected ? 'rotate-180' : ''}`} />
                                     </div>
 
-                                    {/* Problem preview */}
-                                    <div className="flex-1 min-w-0">
-                                        <p className="text-sm text-slate-300 truncate">
-                                            {truncate(session.problem, 50)}
-                                        </p>
-                                        <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
-                                            <span className="flex items-center gap-1">
-                                                <Clock className="h-3 w-3" />
-                                                {formatDate(session.timestamp)}
-                                            </span>
-                                            {session.practiceScore && (
-                                                <span className="flex items-center gap-1 text-emerald-400">
-                                                    <Trophy className="h-3 w-3" />
-                                                    {session.practiceScore.correct}/{session.practiceScore.total}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </div>
+                                    {/* Problem Preview */}
+                                    <p className={`text-sm mb-1 ${isSelected ? 'text-white font-medium' : 'text-slate-300'}`}>
+                                        {truncate(session.problem, 35)}
+                                    </p>
 
-                                    {/* Expand icon */}
-                                    <div className="flex-shrink-0 text-slate-400">
-                                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                                    </div>
-                                </div>
+                                    {/* Time */}
+                                    <p className="text-xs text-slate-500">
+                                        {formatDate(session.timestamp)}
+                                    </p>
 
-                                {/* Expanded content */}
-                                {isExpanded && (
-                                    <div className="mt-3 pt-3 border-t border-slate-700 space-y-3">
-                                        {/* Problem */}
-                                        <div>
-                                            <p className="text-xs text-slate-500 mb-1">Problem</p>
-                                            <p className="text-sm text-slate-300">{session.problem}</p>
-                                        </div>
-
-                                        {/* Answer */}
-                                        {session.finalAnswer && (
-                                            <div>
-                                                <p className="text-xs text-slate-500 mb-1">Answer</p>
-                                                <p className="text-sm text-emerald-400 font-medium">{session.finalAnswer}</p>
-                                            </div>
-                                        )}
-
-                                        {/* Steps count */}
-                                        <div className="text-xs text-slate-500">
-                                            {session.solutionSteps.length} solution step{session.solutionSteps.length !== 1 ? 's' : ''}
-                                            {session.practiceQuiz && ` • ${session.practiceQuiz.length} practice questions`}
-                                        </div>
-
-                                        {/* Actions */}
-                                        <div className="flex gap-2">
-                                            <Button
-                                                size="sm"
+                                    {/* Expanded: View Solution Button */}
+                                    {isSelected && (
+                                        <div className="mt-4 flex gap-2">
+                                            <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
                                                     onSelectSession(session);
                                                 }}
-                                                className="flex-1"
+                                                className="gradient-button flex-1 py-2 text-sm"
                                             >
                                                 View Solution
-                                            </Button>
-                                            {session.practiceQuiz && (
-                                                <div className="flex items-center gap-1 text-xs text-emerald-400 px-2">
-                                                    <Trophy className="h-3 w-3" />
-                                                    <span>{session.practiceQuiz.length} Q's</span>
-                                                </div>
-                                            )}
-                                            <Button
-                                                variant="ghost"
-                                                size="sm"
+                                            </button>
+                                            <button
                                                 onClick={(e) => {
                                                     e.stopPropagation();
                                                     onDelete(session.id);
                                                 }}
-                                                className="text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                                                className="px-3 py-2 rounded-lg border border-slate-600 text-slate-400 hover:text-red-400 hover:border-red-500/50 transition-colors"
                                             >
                                                 <Trash2 className="h-4 w-4" />
-                                            </Button>
+                                            </button>
                                         </div>
-                                    </div>
-                                )}
-                            </CardContent>
-                        </Card>
-                    );
-                })}
+                                    )}
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
-        </div>
+        </div >
     );
 }

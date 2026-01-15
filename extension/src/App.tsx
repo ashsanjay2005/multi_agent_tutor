@@ -1,15 +1,15 @@
 import { useState, useRef, useEffect } from 'react';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
+// Tabs replaced with custom underlined tabs
 import { Button } from './components/ui/button';
 import { Textarea } from './components/ui/textarea';
 import { Alert, AlertDescription, AlertIcon, AlertTitle } from './components/ui/alert';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
+// Card components only used in specific views now
 import { LoadingView } from './components/LoadingView';
 import { DisambiguationView } from './components/DisambiguationView';
 import { SolutionView } from './components/SolutionView';
 import { PracticeView } from './components/PracticeView';
 import { HistoryView } from './components/HistoryView';
-import { Upload, FileText, ImageIcon, X, History } from 'lucide-react';
+import { Upload, X, Sparkles, Pin } from 'lucide-react';
 import { analyzeProblem, resumeWorkflow, generatePractice, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
 import { saveSession, getHistory, deleteSession, clearHistory, updateSession, type HistorySession } from './lib/storage';
@@ -31,6 +31,7 @@ function App() {
   const [historySessions, setHistorySessions] = useState<HistorySession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentSubSteps, setCurrentSubSteps] = useState<Record<string, SubStep[]>>({});
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load history on mount
@@ -412,143 +413,230 @@ function App() {
     }
 
     return (
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="paste">
-            <FileText className="h-4 w-4 mr-1" />
-            Text
-          </TabsTrigger>
-          <TabsTrigger value="screenshot">
-            <Upload className="h-4 w-4 mr-1" />
-            Image
-          </TabsTrigger>
-          <TabsTrigger value="history" onClick={() => setState('history')}>
-            <History className="h-4 w-4 mr-1" />
-            History
-            {historySessions.length > 0 && (
-              <span className="ml-1 text-xs bg-blue-500/30 px-1.5 rounded-full">
-                {historySessions.length}
-              </span>
-            )}
-          </TabsTrigger>
-        </TabsList>
+      <div className="space-y-4">
+        {/* Ask Stepwise Heading */}
+        <h2 className="text-2xl font-bold text-white">Ask Stepwise</h2>
 
-        <TabsContent value="paste" className="space-y-4">
-          <Card className="border-0 shadow-none">
-            <CardHeader>
-              <CardTitle className="text-lg">Paste Math Problem</CardTitle>
-              <CardDescription>
-                Copy and paste your math problem, equation, or question below.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
+        {/* Underlined Tabs */}
+        <div className="underline-tabs">
+          <button
+            className={`underline-tab ${activeTab === 'paste' ? 'active' : ''}`}
+            onClick={() => setActiveTab('paste')}
+          >
+            Text Input
+          </button>
+          <button
+            className={`underline-tab ${activeTab === 'screenshot' ? 'active' : ''}`}
+            onClick={() => setActiveTab('screenshot')}
+          >
+            Upload Image
+          </button>
+          <button
+            className={`underline-tab ${activeTab === 'history' ? 'active' : ''}`}
+            onClick={() => { setActiveTab('history'); setState('history'); }}
+          >
+            History
+          </button>
+        </div>
+
+        {activeTab === 'paste' && (
+          <div className="space-y-4">
+            {/* Your Question Label */}
+            <div className="flex items-center gap-2">
+              <div className="h-3 w-3 rounded-full bg-indigo-500"></div>
+              <span className="text-sm text-slate-300">Your Question</span>
+            </div>
+
+            {/* Glowing Textarea */}
+            <div className="glow-border p-1">
               <Textarea
-                placeholder="Example: Solve for x: 2x + 5 = 13"
+                placeholder="Paste your math problem, equation, or question here...
+
+Example: Solve for x: 2x + 5 = 13"
                 value={textInput}
                 onChange={(e) => setTextInput(e.target.value)}
-                rows={6}
-                className="resize-none"
+                rows={8}
+                className="resize-none bg-transparent border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
               />
-              <Button
-                onClick={handleTextSubmit}
-                disabled={!textInput.trim()}
-                className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/20"
-              >
-                Analyze & Explain
-              </Button>
-            </CardContent>
-          </Card>
-        </TabsContent>
+            </div>
 
-        <TabsContent value="screenshot" className="space-y-4">
-          <Card className="border-0 shadow-none">
-            <CardHeader>
-              <CardTitle className="text-lg">Upload Image</CardTitle>
-              <CardDescription>
-                Upload a screenshot or photo of your STEM problem.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {/* Hidden file input */}
-              <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleFileSelect}
-                accept="image/*"
-                className="hidden"
-              />
+            {/* Gradient Button */}
+            <button
+              onClick={handleTextSubmit}
+              disabled={!textInput.trim()}
+              className="gradient-button w-full flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Analyze & Explain
+              <Sparkles className="h-4 w-4" />
+            </button>
+          </div>
+        )}
 
-              {/* Upload zone or preview */}
-              {imagePreview ? (
+        {activeTab === 'screenshot' && (
+          <div className="space-y-4">
+            {/* Hidden file input */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileSelect}
+              accept="image/*"
+              className="hidden"
+            />
+
+            {/* Upload zone with glowing border */}
+            {imagePreview ? (
+              <div className="glow-border p-4">
                 <div className="relative group">
                   <img
                     src={imagePreview}
                     alt="Uploaded problem"
-                    className="w-full rounded-lg border border-slate-700 max-h-48 object-contain bg-slate-900"
+                    className="w-full rounded-lg max-h-56 object-contain bg-slate-900/50"
                   />
                   {/* Elegant small X button */}
                   <button
                     onClick={clearImage}
-                    className="absolute top-1 right-1 h-5 w-5 rounded-full bg-slate-800/80 hover:bg-red-500 text-slate-400 hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
+                    className="absolute top-2 right-2 h-6 w-6 rounded-full bg-slate-800/90 hover:bg-red-500 text-slate-400 hover:text-white flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100"
                   >
-                    <X className="h-3 w-3" />
+                    <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
-              ) : (
-                <div
-                  className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-muted rounded-lg cursor-pointer hover:border-primary/50 transition-colors"
-                  onClick={() => fileInputRef.current?.click()}
-                  onDragOver={handleDragOver}
-                  onDragEnter={handleDragOver}
-                  onDrop={handleFileDrop}
-                >
-                  <ImageIcon className="h-12 w-12 text-muted-foreground mb-4" />
-                  <p className="text-sm text-muted-foreground text-center mb-2">
-                    Click to upload or drag and drop
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    PNG, JPG up to 10MB
-                  </p>
-                </div>
-              )}
-
-              <Button
-                onClick={handleImageSubmit}
-                disabled={!uploadedImage}
-                className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-500/20"
-                size="lg"
+              </div>
+            ) : (
+              <div
+                className="glow-border flex flex-col items-center justify-center py-12 px-8 cursor-pointer hover:border-indigo-500 transition-all"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragOver}
+                onDrop={handleFileDrop}
               >
-                <Upload className="h-4 w-4 mr-2" />
-                Analyze & Explain
-              </Button>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+                <Upload className="h-14 w-14 text-indigo-400 mb-4" />
+                <p className="text-sm text-slate-300 text-center mb-1">
+                  Click to upload or drag and drop
+                </p>
+                <p className="text-xs text-slate-500">
+                  PNG, JPG up to 10MB
+                </p>
+              </div>
+            )}
+
+            {/* Gradient Button */}
+            <button
+              onClick={handleImageSubmit}
+              disabled={!uploadedImage}
+              className="gradient-button w-full flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Analyze & Explain
+              <Sparkles className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+      </div>
     );
   };
 
   return (
     <div className="w-full h-full bg-background text-foreground overflow-y-auto">
-      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b">
-        <div className="flex items-center justify-between p-4">
+      {/* Stepwise Floating Header */}
+      <div className="p-3">
+        <div className="stepwise-header">
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-md bg-primary flex items-center justify-center">
-              <span className="text-primary-foreground font-bold text-sm">π</span>
+            <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+              <span className="text-white font-bold text-sm">π</span>
             </div>
-            <h1 className="text-lg font-semibold">AI Math Tutor</h1>
+            <h1 className="text-base font-semibold text-white">Stepwise</h1>
           </div>
-          {state !== 'idle' && (
-            <Button variant="ghost" size="sm" onClick={handleReset}>
-              Reset
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {state === 'idle' && (
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  (async () => {
+                    try {
+                      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                      if (tab?.windowId) {
+                        // Wait for the side panel to open before closing
+                        chrome.runtime.sendMessage(
+                          { action: 'openSidePanel', windowId: tab.windowId },
+                          (response) => {
+                            if (response?.success) {
+                              window.close();
+                            }
+                          }
+                        );
+                      }
+                    } catch (err) {
+                      console.error('Failed to open side panel:', err);
+                    }
+                  })();
+                }}
+                className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors px-2 py-1 rounded-md hover:bg-white/5"
+                title="Pin to side panel"
+              >
+                <Pin className="h-3.5 w-3.5" />
+                Pin
+              </button>
+            )}
+            {state !== 'idle' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (state === 'history') {
+                    setShowResetConfirm(true);
+                  } else {
+                    handleReset();
+                  }
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                Reset
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
       <div className="p-4">
         {renderContent()}
       </div>
+
+      {/* Reset Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 rounded-xl p-6 max-w-sm w-full border border-slate-700 shadow-xl">
+            <h3 className="text-lg font-semibold text-white mb-2">Reset History?</h3>
+            <p className="text-sm text-slate-400 mb-6">
+              Are you sure you want to reset your entire history?
+            </p>
+            <div className="flex gap-3 justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowResetConfirm(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => {
+                  clearHistory();
+                  setHistorySessions([]);
+                  setState('idle');
+                  setShowResetConfirm(false);
+                }}
+                className="bg-red-600 hover:bg-red-700"
+              >
+                Reset All
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
