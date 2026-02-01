@@ -22,6 +22,8 @@ from rate_limiter import (
     get_rate_limiter,
     RateLimitConfig
 )
+from cache import init_video_cache, get_video_cache
+from youtube_resources_graph import get_youtube_graph, YouTubeResourcesState
 
 # Configure logging
 logging.basicConfig(
@@ -112,11 +114,37 @@ class ExpandStepResponse(BaseModel):
     stop_reason: Optional[Literal["atomic", "max_depth", "loop_risk", "insufficient_context"]] = None
     message: Optional[str] = None
 
+
+# YouTube Resources models
+class ResourcesRequest(BaseModel):
+    """Request for YouTube video resources."""
+    problem_id: str = Field(..., description="Session ID from frontend")
+    problem_text: str = Field(..., description="The math problem text")
+    topic: str = Field(..., description="Detected topic")
+    offset: int = Field(default=0, ge=0, description="Pagination offset (0, 3, 6, ...)")
+
+
+class VideoResource(BaseModel):
+    """A single YouTube video resource."""
+    video_id: str
+    title: str
+    thumbnail_url: str
+    youtube_url: str
+    relevance_summary: str  # AI-generated "Why this video?"
+
+
+class ResourcesResponse(BaseModel):
+    """Response with YouTube video resources."""
+    videos: list[VideoResource]
+    has_more: bool
+    total_fetched: int
+
 # ============================================================================
 # LIFECYCLE & APP
 # ============================================================================
 
 app_graph = None
+video_cache = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -142,6 +170,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize graph: {e}")
         raise
+    
+    # Initialize video cache
+    global video_cache
+    try:
+        video_cache = await init_video_cache(settings.database_url)
+        logger.info("Video cache initialized")
+    except Exception as e:
+        logger.warning(f"Video cache unavailable: {e}")
     
     yield
     
@@ -585,6 +621,79 @@ Make the questions progressively harder. Use LaTeX for math expressions."""
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             f"Failed to generate practice problems: {str(e)}"
+        )
+
+
+# ============================================================================
+# YOUTUBE RESOURCES ENDPOINT
+# ============================================================================
+
+@app.post("/v1/resources", response_model=ResourcesResponse)
+async def get_youtube_resources(request: ResourcesRequest):
+    """
+    Get YouTube video resources for a math problem.
+    Uses caching to avoid re-fetching for the same problem+offset.
+    """
+    logger.info(f"[Resources] problem_id={request.problem_id}, offset={request.offset}")
+    
+    # 1. Check cache first
+    cache = get_video_cache()
+    if cache:
+        cached_videos = await cache.get(request.problem_id, request.offset)
+        if cached_videos:
+            logger.info(f"[Resources] Cache HIT, returning {len(cached_videos)} videos")
+            return ResourcesResponse(
+                videos=[VideoResource(**v) for v in cached_videos],
+                has_more=len(cached_videos) >= 3,
+                total_fetched=request.offset + len(cached_videos)
+            )
+    
+    # 2. Run the YouTube resources graph
+    try:
+        graph = get_youtube_graph()
+        
+        initial_state: YouTubeResourcesState = {
+            "problem_text": request.problem_text,
+            "topic": request.topic,
+            "offset": request.offset,
+            "key_concepts": [],
+            "search_queries": [],
+            "raw_videos": [],
+            "annotated_videos": []
+        }
+        
+        result = await graph.ainvoke(initial_state)
+        annotated_videos = result.get("annotated_videos", [])
+        
+        # 3. Cache the results
+        if cache and annotated_videos:
+            await cache.set(request.problem_id, request.offset, annotated_videos)
+        
+        # 4. Return response
+        videos = [
+            VideoResource(
+                video_id=v["video_id"],
+                title=v["title"],
+                thumbnail_url=v["thumbnail_url"],
+                youtube_url=v["youtube_url"],
+                relevance_summary=v["relevance_summary"]
+            )
+            for v in annotated_videos
+        ]
+        
+        logger.info(f"[Resources] Returning {len(videos)} videos")
+        
+        return ResourcesResponse(
+            videos=videos,
+            has_more=len(videos) >= 3,
+            total_fetched=request.offset + len(videos)
+        )
+        
+    except Exception as e:
+        logger.error(f"[Resources] Error: {e}", exc_info=True)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Failed to fetch video resources: {str(e)}"
         )
 
 

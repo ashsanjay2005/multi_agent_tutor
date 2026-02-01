@@ -11,6 +11,8 @@ import type {
     PracticeResponse,
     ExpandStepRequest,
     ExpandStepResponse,
+    ResourcesRequest,
+    ResourcesResponse,
 } from './types';
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -154,4 +156,16 @@ export interface QuotaResponse {
 
 export async function getQuota(userId: string = 'anonymous'): Promise<QuotaResponse> {
     return fetchAPI<QuotaResponse>(`/v1/quota?user_id=${encodeURIComponent(userId)}`);
+}
+
+/**
+ * Get YouTube video resources for a problem
+ */
+export async function getYouTubeResources(
+    request: ResourcesRequest
+): Promise<ResourcesResponse> {
+    return fetchAPI<ResourcesResponse>('/v1/resources', {
+        method: 'POST',
+        body: JSON.stringify(request),
+    });
 }

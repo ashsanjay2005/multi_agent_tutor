@@ -2,7 +2,7 @@
  * Chrome Storage utility for persisting session history
  */
 
-import type { SolutionStep, PracticeQuestion, SubStep } from './types';
+import type { SolutionStep, PracticeQuestion, SubStep, VideoResource } from './types';
 
 export interface HistorySession {
     id: string;
@@ -16,6 +16,7 @@ export interface HistorySession {
     expandedSubSteps?: Record<string, SubStep[]>;  // Persisted sub-step expansions
     folderId?: string | null;  // null or undefined = unfiled
     reviewed?: boolean;  // For progress tracking
+    youtubeVideos?: VideoResource[];  // Cached YouTube videos for this problem
 }
 
 export type FolderColor = 'purple' | 'red' | 'green' | 'blue' | 'amber';
@@ -68,7 +69,7 @@ export async function saveSession(session: Omit<HistorySession, 'id' | 'timestam
  */
 export async function updateSession(
     sessionId: string,
-    updates: Partial<Pick<HistorySession, 'practiceQuiz' | 'practiceScore' | 'expandedSubSteps'>>
+    updates: Partial<Pick<HistorySession, 'practiceQuiz' | 'practiceScore' | 'expandedSubSteps' | 'youtubeVideos'>>
 ): Promise<void> {
     const history = await getHistory();
     const index = history.findIndex(s => s.id === sessionId);

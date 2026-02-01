@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw } from 'lucide-react';
+import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw, Play, History } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { expandStep } from '../lib/api';
@@ -19,6 +19,10 @@ interface SolutionViewProps {
   onSubStepsChange?: (subSteps: Record<string, SubStep[]>) => void;  // Save to history
   hasStoredQuiz?: boolean;  // True if there's a saved quiz to review
   onReviewQuiz?: () => void;  // Callback to review stored quiz
+  // YouTube videos
+  onVideosClick?: () => void;
+  videosLoading?: boolean;
+  hasStoredVideos?: boolean;
 }
 
 // ============================================================================
@@ -246,7 +250,8 @@ export function SolutionView({
   html, topic, solutionSteps, finalAnswer, originalProblem,
   onPracticeClick, practiceLoading,
   initialSubSteps, onSubStepsChange,
-  hasStoredQuiz, onReviewQuiz
+  hasStoredQuiz, onReviewQuiz,
+  onVideosClick, videosLoading, hasStoredVideos
 }: SolutionViewProps) {
   const [expandedStep, setExpandedStep] = useState<number | null>(1);
   // Track sub-steps for each step by step path - initialize from history
@@ -533,27 +538,13 @@ export function SolutionView({
           </div>
         )}
 
-        {/* Practice Quiz - Interactive Badge/Pills */}
-        <div className="mt-5 flex flex-col items-center gap-2">
-          {/* Review Previous Quiz (if stored) */}
-          {hasStoredQuiz && onReviewQuiz && (
-            <button
-              onClick={onReviewQuiz}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 hover:border-emerald-400/50 transition-all"
-            >
-              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-              <span className="text-sm font-medium text-slate-200">Review Previous Quiz</span>
-              <span className="text-xs px-1.5 py-0.5 rounded-full bg-emerald-500/30 text-emerald-300">
-                Saved
-              </span>
-            </button>
-          )}
-
-          {/* Generate New Quiz */}
+        {/* Action Bar - 3 Buttons: Quiz, Review, Videos */}
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
+          {/* Quiz Button */}
           <button
             onClick={onPracticeClick}
             disabled={practiceLoading || !topic}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-gradient-to-r from-indigo-500/20 to-purple-500/20 hover:from-indigo-500/30 hover:to-purple-500/30 border border-indigo-500/30 hover:border-indigo-400/50 transition-all disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-indigo-500/15 to-purple-500/15 hover:from-indigo-500/25 hover:to-purple-500/25 border border-indigo-500/30 hover:border-indigo-400/50 transition-all disabled:opacity-50"
           >
             {practiceLoading ? (
               <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
@@ -561,14 +552,48 @@ export function SolutionView({
               <GraduationCap className="h-4 w-4 text-indigo-400" />
             )}
             <span className="text-sm font-medium text-slate-200">
-              {practiceLoading ? 'Generating...' : hasStoredQuiz ? 'Generate New Quiz' : '3 Questions Available'}
+              {practiceLoading ? 'Loading...' : 'Quiz'}
             </span>
-            {!practiceLoading && !hasStoredQuiz && (
+            {!practiceLoading && hasStoredQuiz && (
               <span className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-500/30 text-indigo-300">
-                Quiz
+                ✓
               </span>
             )}
           </button>
+
+          {/* Review Button (only if quiz exists) */}
+          {hasStoredQuiz && onReviewQuiz && (
+            <button
+              onClick={onReviewQuiz}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 hover:border-emerald-400/50 transition-all"
+            >
+              <History className="h-4 w-4 text-emerald-400" />
+              <span className="text-sm font-medium text-slate-200">Review</span>
+            </button>
+          )}
+
+          {/* Videos Button */}
+          {onVideosClick && (
+            <button
+              onClick={onVideosClick}
+              disabled={videosLoading || !topic}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 hover:border-red-400/50 transition-all disabled:opacity-50"
+            >
+              {videosLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin text-red-400" />
+              ) : (
+                <Play className="h-4 w-4 text-red-400" />
+              )}
+              <span className="text-sm font-medium text-slate-200">
+                {videosLoading ? 'Loading...' : 'Videos'}
+              </span>
+              {!videosLoading && hasStoredVideos && (
+                <span className="text-xs px-1.5 py-0.5 rounded-full bg-red-500/30 text-red-300">
+                  ✓
+                </span>
+              )}
+            </button>
+          )}
         </div>
 
         {/* Action Buttons */}

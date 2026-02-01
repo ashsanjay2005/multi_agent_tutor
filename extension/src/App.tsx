@@ -9,13 +9,14 @@ import { DisambiguationView } from './components/DisambiguationView';
 import { SolutionView } from './components/SolutionView';
 import { PracticeView } from './components/PracticeView';
 import { HistoryView } from './components/HistoryView';
+import { YouTubeVideosView } from './components/YouTubeVideosView';
 import { Upload, X, Sparkles, Pin } from 'lucide-react';
-import { analyzeProblem, resumeWorkflow, generatePractice, APIError, RateLimitError } from './lib/api';
+import { analyzeProblem, resumeWorkflow, generatePractice, getYouTubeResources, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
 import { saveSession, getHistory, deleteSession, clearHistory, updateSession, getFolders, createFolder, deleteFolder as deleteFolderStorage, moveToFolder, batchMoveToFolder, batchMarkReviewed, batchDeleteSessions, type HistorySession, type Folder } from './lib/storage';
-import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep } from './lib/types';
+import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep, VideoResource } from './lib/types';
 
-type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'history' | 'error';
+type AppState = 'idle' | 'loading' | 'disambiguation' | 'solution' | 'practice' | 'history' | 'videos' | 'error';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'paste' | 'screenshot' | 'history'>('paste');
@@ -33,6 +34,12 @@ function App() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentSubSteps, setCurrentSubSteps] = useState<Record<string, SubStep[]>>({});
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  // YouTube videos state
+  const [youtubeVideos, setYoutubeVideos] = useState<VideoResource[]>([]);
+  const [videosLoading, setVideosLoading] = useState(false);
+  const [videosLoadingMore, setVideosLoadingMore] = useState(false);
+  const [videosOffset, setVideosOffset] = useState(0);
+  const [videosHasMore, setVideosHasMore] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load history and folders on mount
@@ -308,6 +315,74 @@ function App() {
     setHistorySessions(await getHistory());
   };
 
+  // YouTube Videos Handlers
+  const handleVideosClick = async () => {
+    if (!response?.topic || !originalProblem || !currentSessionId) return;
+
+    // If we already have videos, just navigate to view
+    if (youtubeVideos.length > 0) {
+      setState('videos');
+      return;
+    }
+
+    // Fetch new videos
+    setVideosLoading(true);
+    setState('videos');
+
+    try {
+      const result = await getYouTubeResources({
+        problem_id: currentSessionId,
+        problem_text: originalProblem,
+        topic: response.topic,
+        offset: 0,
+      });
+
+      setYoutubeVideos(result.videos);
+      setVideosHasMore(result.has_more);
+      setVideosOffset(result.videos.length);
+
+      // Cache to session
+      await updateSession(currentSessionId, {
+        youtubeVideos: result.videos,
+      });
+      setHistorySessions(await getHistory());
+    } catch (err) {
+      console.error('Failed to fetch videos:', err);
+    } finally {
+      setVideosLoading(false);
+    }
+  };
+
+  const handleLoadMoreVideos = async () => {
+    if (!response?.topic || !originalProblem || !currentSessionId) return;
+
+    setVideosLoadingMore(true);
+
+    try {
+      const result = await getYouTubeResources({
+        problem_id: currentSessionId,
+        problem_text: originalProblem,
+        topic: response.topic,
+        offset: videosOffset,
+      });
+
+      const allVideos = [...youtubeVideos, ...result.videos];
+      setYoutubeVideos(allVideos);
+      setVideosHasMore(result.has_more);
+      setVideosOffset(videosOffset + result.videos.length);
+
+      // Update cache
+      await updateSession(currentSessionId, {
+        youtubeVideos: allVideos,
+      });
+      setHistorySessions(await getHistory());
+    } catch (err) {
+      console.error('Failed to load more videos:', err);
+    } finally {
+      setVideosLoadingMore(false);
+    }
+  };
+
   const handleClearHistory = async () => {
     await clearHistory();
     setHistorySessions([]);
@@ -333,6 +408,15 @@ function App() {
     } else {
       setPracticeQuestions([]);
     }
+    // Load cached YouTube videos if exists
+    if (session.youtubeVideos && session.youtubeVideos.length > 0) {
+      setYoutubeVideos(session.youtubeVideos);
+      setVideosHasMore(session.youtubeVideos.length >= 3);
+    } else {
+      setYoutubeVideos([]);
+      setVideosHasMore(false);
+    }
+    setVideosOffset(0);
     setState('solution');
   };
 
@@ -385,6 +469,23 @@ function App() {
           onSubStepsChange={handleSubStepsChange}
           hasStoredQuiz={practiceQuestions.length > 0}
           onReviewQuiz={() => setState('practice')}
+          onVideosClick={handleVideosClick}
+          videosLoading={videosLoading}
+          hasStoredVideos={youtubeVideos.length > 0}
+        />
+      );
+    }
+
+    if (state === 'videos') {
+      return (
+        <YouTubeVideosView
+          videos={youtubeVideos}
+          loading={videosLoading}
+          hasMore={videosHasMore}
+          loadingMore={videosLoadingMore}
+          onLoadMore={handleLoadMoreVideos}
+          onBack={() => setState('solution')}
+          topic={response?.topic || undefined}
         />
       );
     }

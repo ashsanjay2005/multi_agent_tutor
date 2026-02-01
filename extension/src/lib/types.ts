@@ -123,3 +123,25 @@ export interface ExpandStepResponse {
     stop_reason?: StopReason;
     message?: string;
 }
+
+// YouTube Video Resources Types
+export interface VideoResource {
+    video_id: string;
+    title: string;
+    thumbnail_url: string;
+    youtube_url: string;
+    relevance_summary: string;  // AI-generated "Why this video?"
+}
+
+export interface ResourcesRequest {
+    problem_id: string;
+    problem_text: string;
+    topic: string;
+    offset?: number;  // 0, 3, 6, ... for pagination
+}
+
+export interface ResourcesResponse {
+    videos: VideoResource[];
+    has_more: boolean;
+    total_fetched: number;
+}
