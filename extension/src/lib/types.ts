@@ -87,6 +87,9 @@ export interface SolutionStep {
     sub_steps?: SolutionStep[];
     can_expand?: boolean;  // Default true
     depth?: number;        // 0=top-level
+    // Visualization support
+    image_url?: string;    // GCS URL to graph/diagram
+    image_alt?: string;    // Accessibility description
 }
 
 export interface PreviousStepSummary {

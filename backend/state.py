@@ -33,10 +33,17 @@ class GraphState(TypedDict):
     worked_example: Optional[str]  # Markdown/LaTeX
     practice_problem: Optional[str]
     video_url: Optional[str]
-    solution_steps: Optional[List[dict]]  # [{step_number, title, explanation, math_expression}]
+    solution_steps: Optional[List[dict]]  # [{step_number, title, explanation, math_expression, needs_visual, visual_elements}]
+    
+    # --- Visualization (Parallel agent output) ---
+    visualization_steps: Optional[List[dict]]  # [{step, text, has_visual, image_url, alt_text}]
+    visualization_fallback: bool  # True if visualization failed after retries
+    
+    # --- Progressive Visualization (NEW) ---
+    is_graphing_problem: bool  # True if the problem asks for a graph as the answer
+    step_images: Optional[dict]  # {step_number: image_url} - per-step visualization URLs
+    final_graph_url: Optional[str]  # URL to the final complete graph
     
     # --- Output ---
     final_response_html: Optional[str]
     requires_user_action: bool  # True if we are waiting for topic selection
-
-

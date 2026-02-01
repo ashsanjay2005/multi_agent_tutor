@@ -49,8 +49,19 @@ class Settings(BaseSettings):
     vision_model: str = "gemini-2.0-flash"  # OpenAI: "gpt-4o"
     text_model: str = "gemini-2.0-flash"  # OpenAI: "gpt-4o-mini"
     
+    # Gemini API (for code execution)
+    gemini_api_key: str = ""  # Falls back to google_api_key if not set
+    
+    # Google Cloud Storage (for visualization images)
+    gcs_bucket_name: str = "stepwise-visualizations"
+    
     # Logging
     log_level: str = "INFO"
+    
+    @property
+    def get_gemini_key(self) -> str:
+        """Returns Gemini API key, falling back to google_api_key."""
+        return self.gemini_api_key or self.google_api_key
 
 
 # Global settings instance

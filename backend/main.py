@@ -69,6 +69,7 @@ class AnalyzeResponse(BaseModel):
     confidence_score: Optional[float] = None
     solution_steps: Optional[list[dict]] = None  # Step-by-step solution
     final_answer: Optional[str] = None  # Final answer from solver
+    final_graph_url: Optional[str] = None  # URL to final complete graph (for graphing problems)
     extracted_problem: Optional[str] = None  # Problem text (extracted from image or original text)
 
 class HealthResponse(BaseModel):
@@ -240,6 +241,8 @@ async def analyze_problem(request: AnalyzeRequest):
             "practice_problem": None,
             "video_url": None,
             "solution_steps": None,
+            "visualization_steps": None,
+            "visualization_fallback": False,
             "final_response_html": None,
             "requires_user_action": False
         }
@@ -261,6 +264,7 @@ async def analyze_problem(request: AnalyzeRequest):
             confidence_score=result.get("confidence_score"),
             solution_steps=result.get("solution_steps"),
             final_answer=result.get("worked_example"),
+            final_graph_url=result.get("final_graph_url"),
             extracted_problem=result.get("input_content")  # Contains extracted text for images
         )
     except Exception as e:

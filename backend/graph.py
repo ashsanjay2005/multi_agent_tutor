@@ -24,6 +24,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from state import GraphState
 from config import settings
+from visualization_agent import generate_visualization, should_visualize, generate_step_visualizations
 
 
 # ============================================================================
@@ -60,19 +61,25 @@ class TeachingPlan(BaseModel):
 
 
 class SolutionStep(BaseModel):
-    """Single step in a worked solution."""
+    """Single step in a worked solution with optional visualization."""
     step_number: int = Field(description="Step number starting from 1")
     title: str = Field(description="Short title like 'Identify the vectors' or 'Apply the formula'")
     explanation: str = Field(description="Clear explanation of what we're doing in this step")
     math_expression: str = Field(default="", description="LaTeX math expression if applicable, empty string if not")
+    needs_visual: bool = Field(default=False, description="True if this step visually changes the graph (adds asymptotes, intercepts, etc)")
+    visual_elements: list[str] = Field(
+        default_factory=list, 
+        description="Visual elements added by this step. Examples: 'vertical_asymptote_x=1', 'x_intercept_(-1,0)', 'y_intercept_(0,-4)', 'oblique_asymptote_y=x^2-2x-2', 'positive_region_(-inf,-1)', 'function_curve'"
+    )
 
 
 class WorkedSolution(BaseModel):
-    """Complete step-by-step solution."""
+    """Complete step-by-step solution with visualization support."""
     problem_restatement: str = Field(description="Restate the problem clearly in one sentence")
     steps: list[SolutionStep] = Field(description="3-6 solution steps")
     final_answer: str = Field(description="The final answer with units if applicable")
     key_concepts: list[str] = Field(description="2-4 key concepts used in this solution")
+    is_graphing_problem: bool = Field(default=False, description="True if the problem asks for a graph/sketch as the final answer")
 
 
 # ============================================================================
@@ -472,15 +479,38 @@ Create a detailed step-by-step solution. Each step should:
 1. Have a clear, short title
 2. Explain what we're doing and why
 3. Include math expressions in LaTeX format (use $ delimiters)
+4. For GRAPHING problems: indicate if this step VISUALLY changes the graph
+
+## Visualization Instructions (for graphing/plotting problems):
+For graphing problems, each step should include:
+- `needs_visual`: true if this step adds something visible to the graph
+- `visual_elements`: list of elements added by this step
+
+### Visual Elements Vocabulary:
+- "vertical_asymptote_x=<value>" - a vertical asymptote
+- "horizontal_asymptote_y=<value>" - a horizontal asymptote  
+- "oblique_asymptote_<expression>" - an oblique/slant asymptote
+- "x_intercept_(<x>,0)" - an x-intercept point
+- "y_intercept_(0,<y>)" - a y-intercept point
+- "point_(<x>,<y>)" - a key point
+- "positive_region_(<start>,<end>)" - where function is positive
+- "negative_region_(<start>,<end>)" - where function is negative
+- "function_curve" - the actual function curve (usually in final step)
+
+### Example for graphing f(x) = (x-2)²(x+1)/(x-1):
+Step 1 (Domain): needs_visual=true, visual_elements=["vertical_asymptote_x=1"]
+Step 2 (Intercepts): needs_visual=true, visual_elements=["x_intercept_(-1,0)", "x_intercept_(2,0)", "y_intercept_(0,-4)"]
+Step 3 (Asymptotes): needs_visual=true, visual_elements=["oblique_asymptote_y=x^2-2x-2"]
+Step 4 (Sign Analysis): needs_visual=true, visual_elements=["positive_region_(-inf,-1)", "negative_region_(-1,1)"]
+Step 5 (Final Sketch): needs_visual=true, visual_elements=["function_curve"]
+
+Set `is_graphing_problem=true` if the problem asks for a graph/sketch as the final answer.
 
 Topic-specific guidance:
+- Graphing Functions: Include domain, intercepts, asymptotes, sign analysis, then final sketch
 - Cross Product: Use the determinant method with i, j, k unit vectors
-- Dot Product: Multiply corresponding components and sum
-- Matrix Multiplication: Show row × column operations
 - Derivatives: Apply power rule, chain rule, etc. step by step
 - Integrals: Show substitution or direct integration
-- Stoichiometry: Show unit conversions and molar calculations
-- Linear Equations: Show isolation of variable steps
 
 Generate 3-6 clear steps that a student can follow."""),
         ("human", "Solve this step by step: {problem}")
@@ -494,30 +524,34 @@ Generate 3-6 clear steps that a student can follow."""),
             "problem": state["input_content"]
         })
         
-        # Convert to dict format for JSON serialization
+        # Convert to dict format for JSON serialization (including visualization fields)
         steps_dict = [
             {
                 "step_number": s.step_number,
                 "title": s.title,
                 "explanation": s.explanation,
-                "math_expression": s.math_expression
+                "math_expression": s.math_expression,
+                "needs_visual": s.needs_visual,
+                "visual_elements": s.visual_elements
             }
             for s in result.steps
         ]
         
-        print(f"[StepSolver] Generated {len(steps_dict)} steps")
+        print(f"[StepSolver] Generated {len(steps_dict)} steps, is_graphing={result.is_graphing_problem}")
         
         return {
             **state,
             "solution_steps": steps_dict,
-            "worked_example": result.final_answer
+            "worked_example": result.final_answer,
+            "is_graphing_problem": result.is_graphing_problem
         }
     except Exception as e:
         print(f"[StepSolver] Error: {e}")
         return {
             **state,
-            "solution_steps": [{"step_number": 1, "title": "Error", "explanation": "Failed to generate solution", "math_expression": ""}],
-            "worked_example": "Solution generation failed"
+            "solution_steps": [{"step_number": 1, "title": "Error", "explanation": "Failed to generate solution", "math_expression": "", "needs_visual": False, "visual_elements": []}],
+            "worked_example": "Solution generation failed",
+            "is_graphing_problem": False
         }
 
 
@@ -533,24 +567,129 @@ async def video_node(state: GraphState) -> GraphState:
     return {**state, "video_url": "https://youtube.com/watch?v=example"}
 
 
+async def visualization_node(state: GraphState) -> GraphState:
+    """Generates visualizations for problems that need graphs/diagrams."""
+    print(f"[Visualization] Checking if visualization needed...")
+    
+    problem = state.get("input_content", "")
+    topic = state.get("topic", "")
+    solution_steps = state.get("solution_steps", [])
+    
+    # Run visualization generation
+    result = await generate_visualization(problem, topic, solution_steps)
+    
+    viz_steps = [step.model_dump() for step in result.steps] if result.steps else []
+    
+    print(f"[Visualization] Generated {len(viz_steps)} visualization step(s), fallback={result.fallback_text_only}")
+    
+    return {
+        **state,
+        "visualization_steps": viz_steps,
+        "visualization_fallback": result.fallback_text_only
+    }
+
+
 async def parallel_teaching_nodes(state: GraphState) -> GraphState:
-    """Runs practice and video agents concurrently (step_solver runs before this)."""
-    print("[ParallelExecution] Running practice and video agents concurrently...")
-    results = await asyncio.gather(
-        practice_node(state),
-        video_node(state)
+    """Runs step_solver + visualization agents concurrently, then practice + video."""
+    print("[ParallelExecution] Running step_solver and visualization concurrently...")
+    
+    # Phase 1: Step solver and visualization in parallel
+    solver_result, viz_result = await asyncio.gather(
+        step_solver_node(state),
+        visualization_node(state)
     )
+    
+    # Merge phase 1 results - extract only the keys each agent is responsible for
+    # This prevents visualization_node's copy of the original state from overwriting solution_steps
     merged_state = {**state}
-    for result in results:
-        merged_state.update(result)
+    
+    # Extract step solver outputs (including is_graphing_problem for progressive viz)
+    merged_state["solution_steps"] = solver_result.get("solution_steps")
+    merged_state["worked_example"] = solver_result.get("worked_example")
+    merged_state["is_graphing_problem"] = solver_result.get("is_graphing_problem", False)
+    
+    # Extract visualization outputs
+    merged_state["visualization_steps"] = viz_result.get("visualization_steps")
+    merged_state["visualization_fallback"] = viz_result.get("visualization_fallback", False)
+    
+    # Phase 2: Practice and video (depend on solution)
+    print("[ParallelExecution] Running practice and video agents concurrently...")
+    practice_result, video_result = await asyncio.gather(
+        practice_node(merged_state),
+        video_node(merged_state)
+    )
+    
+    # Extract specific outputs from phase 2
+    merged_state["practice_problem"] = practice_result.get("practice_problem")
+    merged_state["video_url"] = video_result.get("video_url")
+    
     return merged_state
 
 
 async def assembler_node(state: GraphState) -> GraphState:
-    print("[Assembler] Compiling final response...")
+    """Merges step solver output with visualization output, generating progressive step images for graphing problems."""
+    print("[Assembler] Merging solution steps with visualizations...")
+    
+    solution_steps = state.get("solution_steps", []) or []
+    viz_steps = state.get("visualization_steps", []) or []
+    is_graphing = state.get("is_graphing_problem", False)
+    
+    final_graph_url = None
+    
+    # For graphing problems: generate progressive step-specific visualizations
+    if is_graphing and solution_steps:
+        print("[Assembler] Graphing problem detected, generating progressive visualizations...")
+        
+        try:
+            # Use programmatic step visualization generator
+            step_images = await generate_step_visualizations(
+                problem=state.get("input_content", ""),
+                topic=state.get("topic", ""),
+                solution_steps=solution_steps
+            )
+            
+            # Extract final graph URL
+            if "final" in step_images:
+                final_graph_url = step_images.pop("final")
+            
+            # Attach images to corresponding steps
+            for step in solution_steps:
+                step_num = step.get("step_number", 0)
+                if step_num in step_images:
+                    step["image_url"] = step_images[step_num]
+                    step["image_alt"] = f"Graph showing step {step_num}: {step.get('title', '')}"
+                # If step has needs_visual=True but no image was generated, remove needs_visual
+                # This prevents empty boxes in the frontend
+                elif step.get("needs_visual") and not step.get("visual_elements"):
+                    step["needs_visual"] = False
+            
+            attached_count = sum(1 for s in solution_steps if s.get("image_url"))
+            print(f"[Assembler] Generated {attached_count} step images, final_graph={final_graph_url is not None}")
+            
+        except Exception as e:
+            print(f"[Assembler] Progressive visualization error: {e}")
+            # Fallback to single visualization from viz agent
+            for viz in viz_steps:
+                if viz.get("has_visual") and viz.get("image_url"):
+                    # Attach to first step only
+                    solution_steps[0]["image_url"] = viz["image_url"]
+                    solution_steps[0]["image_alt"] = viz.get("alt_text", "")
+                    final_graph_url = viz["image_url"]
+                    break
+    
+    # Non-graphing problems: attach single viz to first step only (legacy behavior)
+    elif viz_steps and solution_steps:
+        for viz in viz_steps:
+            if viz.get("has_visual") and viz.get("image_url"):
+                solution_steps[0]["image_url"] = viz["image_url"]
+                solution_steps[0]["image_alt"] = viz.get("alt_text", "")
+                break
+    
     final_html = f"<html><body><h1>{state['topic']}</h1></body></html>"
     return {
         **state,
+        "solution_steps": solution_steps,
+        "final_graph_url": final_graph_url,
         "final_response_html": final_html,
         "requires_user_action": False
     }
@@ -610,9 +749,9 @@ def create_stem_tutor_graph(checkpointer) -> StateGraph:
     workflow.add_edge("clarification", END)
     workflow.add_edge("disambiguation", END)
     
-    # Teaching pipeline: architect → step_solver → parallel → assembler
-    workflow.add_edge("teaching_architect", "step_solver")
-    workflow.add_edge("step_solver", "parallel_teaching")
+    # Teaching pipeline: architect → parallel(step_solver + visualization) → assembler
+    # Note: step_solver now runs inside parallel_teaching along with visualization
+    workflow.add_edge("teaching_architect", "parallel_teaching")
     workflow.add_edge("parallel_teaching", "assembler")
     workflow.add_edge("assembler", END)
     

@@ -368,6 +368,18 @@ export function SolutionView({
                         <MathDisplay latex={step.math_expression} />
                       )}
 
+                      {/* Visualization Image (if available) */}
+                      {step.image_url && (
+                        <div className="mt-4 mb-2">
+                          <img
+                            src={step.image_url}
+                            alt={step.image_alt || 'Mathematical visualization'}
+                            loading="lazy"
+                            className="rounded-lg max-w-full bg-[#0B1220] border border-slate-700/50"
+                          />
+                        </div>
+                      )}
+
                       {/* Sub-steps (if expanded) with fading hierarchy */}
                       {subStepsMap[stepPath] && (() => {
                         const depth2Style = getHierarchyLineStyle(2);

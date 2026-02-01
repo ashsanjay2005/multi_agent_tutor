@@ -42,6 +42,9 @@ poetry.lock
 .env.local
 .env.*.local
 
+# Keys
+keys/*.json
+
 # Logs
 *.log
 logs/
