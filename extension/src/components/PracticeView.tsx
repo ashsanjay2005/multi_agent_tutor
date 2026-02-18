@@ -4,6 +4,8 @@ import { Button } from './ui/button';
 import { CheckCircle2, XCircle, ChevronRight, ArrowLeft } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import { logQuizResult } from '../lib/api';
+import { getUserId } from '../lib/utils';
 
 interface PracticeQuestion {
     question: string;
@@ -65,9 +67,19 @@ export function PracticeView({ topic, questions, onBack, onMoreQuestions, loadin
         setSelectedAnswer(index);
         setShowResult(true);
         setFocusedOption(index); // Focus on selected by default
-        if (index === question.correct_index) {
+
+        const isCorrect = index === question.correct_index;
+        if (isCorrect) {
             setScore(s => s + 1);
         }
+
+        // Log quiz result to Backboard for adaptive profiling (fire-and-forget)
+        logQuizResult({
+            user_id: getUserId(),
+            concept: topic?.split(' - ').pop()?.replace(/\s+/g, '_').toLowerCase() || 'unknown',
+            correct: isCorrect,
+            question_summary: question.question.substring(0, 100)
+        });
     };
 
     const handleNext = () => {

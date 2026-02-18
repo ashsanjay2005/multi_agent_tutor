@@ -30,21 +30,48 @@ class VideoCache:
         self.pool = pool
     
     async def ensure_table(self):
-        """Create the cache table if it doesn't exist."""
+        """Create the cache table if it doesn't exist, and migrate schema."""
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS video_cache (
                     id SERIAL PRIMARY KEY,
-                    problem_id VARCHAR(255) NOT NULL,
-                    offset_index INT NOT NULL,
+                    problem_hash VARCHAR(255) NOT NULL,
+                    offset_index INT NOT NULL DEFAULT 0,
                     videos JSONB NOT NULL,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(problem_id, offset_index)
+                    UNIQUE(problem_hash, offset_index)
                 );
                 
                 CREATE INDEX IF NOT EXISTS idx_video_cache_created 
                 ON video_cache(created_at);
             """)
+            
+            # Migration: add offset_index if the table pre-dates pagination
+            col_exists = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'video_cache' AND column_name = 'offset_index'
+                )
+            """)
+            if not col_exists:
+                logger.info("[VideoCache] Migrating: adding offset_index column")
+                await conn.execute("""
+                    ALTER TABLE video_cache 
+                    ADD COLUMN offset_index INT NOT NULL DEFAULT 0;
+                """)
+                # Drop any old unique constraint on problem_hash alone,
+                # then create the composite one.
+                await conn.execute("""
+                    ALTER TABLE video_cache 
+                    DROP CONSTRAINT IF EXISTS video_cache_problem_hash_key;
+                """)
+                await conn.execute("""
+                    ALTER TABLE video_cache 
+                    ADD CONSTRAINT video_cache_problem_hash_offset_index_key 
+                    UNIQUE (problem_hash, offset_index);
+                """)
+                logger.info("[VideoCache] Migration complete")
+            
             logger.info("[VideoCache] Table ensured")
     
     async def get(self, problem_id: str, offset: int) -> Optional[list[dict]]:
@@ -56,7 +83,7 @@ class VideoCache:
             row = await conn.fetchrow("""
                 SELECT videos, created_at 
                 FROM video_cache 
-                WHERE problem_id = $1 AND offset_index = $2
+                WHERE problem_hash = $1 AND offset_index = $2
             """, problem_id, offset)
             
             if row is None:
@@ -70,7 +97,7 @@ class VideoCache:
                 # Optionally delete expired entry
                 await conn.execute("""
                     DELETE FROM video_cache 
-                    WHERE problem_id = $1 AND offset_index = $2
+                    WHERE problem_hash = $1 AND offset_index = $2
                 """, problem_id, offset)
                 return None
             
@@ -85,9 +112,9 @@ class VideoCache:
         async with self.pool.acquire() as conn:
             videos_json = json.dumps(videos)
             await conn.execute("""
-                INSERT INTO video_cache (problem_id, offset_index, videos, created_at)
+                INSERT INTO video_cache (problem_hash, offset_index, videos, created_at)
                 VALUES ($1, $2, $3, NOW())
-                ON CONFLICT (problem_id, offset_index) 
+                ON CONFLICT (problem_hash, offset_index) 
                 DO UPDATE SET videos = $3, created_at = NOW()
             """, problem_id, offset, videos_json)
             

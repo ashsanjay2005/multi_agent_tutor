@@ -4,7 +4,8 @@ import { Button } from './ui/button';
 import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw, Play, History } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
-import { expandStep } from '../lib/api';
+import { expandStep, logBreakdown } from '../lib/api';
+import { getUserId } from '../lib/utils';
 import type { SolutionStep, SubStep, StopReason } from '../lib/types';
 
 interface SolutionViewProps {
@@ -73,12 +74,64 @@ function looksLikeEquation(text: string): boolean {
   return equationPatterns.some(pattern => pattern.test(text));
 }
 
+// ============================================================================
+// LATEX PREPROCESSING - Repair stripped backslashes from JSON transfer
+// ============================================================================
+
+// Common LaTeX commands that may have their backslashes stripped
+const LATEX_COMMANDS = [
+  'frac', 'sqrt', 'sum', 'prod', 'int', 'lim', 'infty',
+  'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda', 'mu', 'pi', 'sigma', 'omega',
+  'Delta', 'Gamma', 'Lambda', 'Omega', 'Phi', 'Pi', 'Sigma', 'Theta',
+  'sin', 'cos', 'tan', 'log', 'ln', 'exp', 'det', 'dim', 'ker', 'min', 'max',
+  'vec', 'hat', 'bar', 'dot', 'tilde', 'overline', 'underline',
+  'mathbb', 'mathbf', 'mathrm', 'mathit', 'mathcal', 'mathsf',
+  'text', 'textbf', 'textit',
+  'left', 'right', 'big', 'Big', 'bigg', 'Bigg',
+  'cdot', 'cdots', 'ldots', 'vdots', 'ddots',
+  'times', 'div', 'pm', 'mp', 'leq', 'geq', 'neq', 'approx', 'equiv', 'sim',
+  'forall', 'exists', 'in', 'notin', 'subset', 'supset', 'cup', 'cap',
+  'to', 'rightarrow', 'leftarrow', 'Rightarrow', 'Leftarrow', 'iff',
+  'partial', 'nabla', 'grad',
+  'begin', 'end', 'bmatrix', 'pmatrix', 'vmatrix', 'cases',
+  'quad', 'qquad', 'hspace', 'vspace',
+  'color', 'boxed', 'cancel',
+];
+
+// Preprocess LaTeX to repair stripped backslashes
+function preprocessLaTeX(text: string): string {
+  if (!text) return '';
+
+  let result = text;
+
+  // Repair common LaTeX commands that lost their backslash
+  // Match command at word boundary, not already preceded by backslash
+  for (const cmd of LATEX_COMMANDS) {
+    // Match: not preceded by backslash, followed by { or word boundary
+    const regex = new RegExp(`(?<!\\\\)\\b(${cmd})(?=\\{|\\s|\\(|\\)|\\[|\\]|$|[^a-zA-Z])`, 'g');
+    result = result.replace(regex, '\\$1');
+  }
+
+  // Standardize delimiters: \[ \] to $$
+  result = result.replace(/\\\[/g, '$$');
+  result = result.replace(/\\\]/g, '$$');
+
+  // Standardize delimiters: \( \) to $
+  result = result.replace(/\\\(/g, '$');
+  result = result.replace(/\\\)/g, '$');
+
+  return result;
+}
+
 // Parse text and render inline LaTeX ($...$) and display LaTeX ($$...$$)
 function renderLatexInText(text: string): string {
   if (!text) return '';
 
+  // Preprocess to repair stripped backslashes
+  const processedText = preprocessLaTeX(text);
+
   // Handle display math \[...\] - add block spacing
-  let result = text.replace(/\\\[([^\]]+)\\\]/g, (_, latex) => {
+  let result = processedText.replace(/\\\[([^\]]+)\\\]/g, (_, latex) => {
     try {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
@@ -134,7 +187,7 @@ function renderLatexInText(text: string): string {
   });
 
   // If no $ delimiters were found but text looks like equation, try to render it
-  if (!text.includes('$') && looksLikeEquation(result)) {
+  if (!processedText.includes('$') && looksLikeEquation(result)) {
     try {
       const rendered = katex.renderToString(result.trim(), {
         throwOnError: false,
@@ -290,6 +343,14 @@ export function SolutionView({
         problem_statement: originalProblem || '',
         topic: topic || '',
         current_depth: depth,
+      });
+
+      // Log breakdown to Backboard for adaptive profiling (fire-and-forget)
+      logBreakdown({
+        user_id: getUserId(),
+        step_title: step.title,
+        concept: topic?.split(' - ').pop()?.replace(/\s+/g, '_').toLowerCase() || 'unknown',
+        context: `${originalProblem || ''} | ${step.explanation}`
       });
 
       if (result.stop_reason) {

@@ -26,8 +26,17 @@
     "activeTab",
     "scripting",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
+  "oauth2": {
+    "client_id": "873376819767-64ihlueptbos1vc5pe5diuccdrangqug.apps.googleusercontent.com",
+    "scopes": [
+      "openid",
+      "email",
+      "profile"
+    ]
+  },
   "host_permissions": [
     "http://localhost:8000/*"
   ],

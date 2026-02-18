@@ -1,6 +1,8 @@
-import { useState } from 'react';
-import { ChevronDown, ChevronRight, Trash2, BookOpen, FolderPlus, Folder, FolderOpen, X, Plus, Check, CheckSquare, Square } from 'lucide-react';
+import { useState, useMemo, useEffect } from 'react';
+import { ChevronDown, ChevronRight, Trash2, BookOpen, FolderPlus, Folder, FolderOpen, X, Plus, Check, CheckSquare, Square, Brain, Sparkles } from 'lucide-react';
 import type { HistorySession, Folder as FolderType, FolderColor } from '../lib/storage';
+import { syncFolder, suggestFolder as suggestFolderAPI } from '../lib/api';
+import { getUserId } from '../lib/utils';
 
 // Color mappings
 const FOLDER_COLORS: Record<FolderColor, { bg: string; border: string; text: string; accent: string }> = {
@@ -18,6 +20,7 @@ interface HistoryViewProps {
     onClearAll: () => void;
     onSelectSession: (session: HistorySession) => void;
     onCreateFolder: (name: string, color: FolderColor) => void;
+    onCreateAndPopulateFolder: (name: string, color: FolderColor, sessionIds: string[]) => void;
     onDeleteFolder: (folderId: string) => void;
     onMoveToFolder: (sessionId: string, folderId: string | null) => void;
     onBatchMove: (sessionIds: string[], folderId: string | null) => void;
@@ -60,6 +63,223 @@ function getPrimaryTopic(items: HistorySession[]): string {
     }, {} as Record<string, number>);
     const sorted = Object.entries(topicCounts).sort((a, b) => b[1] - a[1]);
     return sorted[0]?.[0] ? `Mostly ${truncate(sorted[0][0], 12)}` : '';
+}
+
+// Smart Grouping Suggestion Component (Semantic)
+// Uses Backboard API for intelligent folder suggestions
+function SmartGroupingSuggestion({
+    sessions,
+    folders,
+    onCreateAndPopulateFolder,
+    onMoveToFolder,
+}: {
+    sessions: HistorySession[];
+    folders: FolderType[];
+    onCreateAndPopulateFolder: (name: string, color: FolderColor, sessionIds: string[]) => void;
+    onMoveToFolder: (sessionId: string, folderId: string | null) => void;
+}) {
+    const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+    const [suggestion, setSuggestion] = useState<{
+        action: 'add_to_folder' | 'suggest_new_folder' | 'no_suggestion';
+        folderId?: string;
+        folderName?: string;
+        category?: string;
+        sessionIds: string[];
+    } | null>(null);
+    const [loading, setLoading] = useState(false);
+
+    // Get unfiled sessions
+    const unfiledSessions = useMemo(() =>
+        sessions.filter(s => !s.folderId), [sessions]);
+
+    // Fetch semantic suggestions on mount/change
+    useEffect(() => {
+        const fetchSuggestion = async () => {
+            if (unfiledSessions.length < 2) {
+                setSuggestion(null);
+                return;
+            }
+
+            // Find the most recent unfiled session to use as query
+            const recentSession = unfiledSessions[0];
+            if (!recentSession || dismissed.has(recentSession.id)) {
+                // Fall back to lexical clustering
+                const clusters = detectTopicClusters(unfiledSessions);
+                const topCluster = Array.from(clusters.entries())
+                    .filter(([cat]) => !dismissed.has(cat))
+                    .sort((a, b) => b[1].length - a[1].length)[0];
+
+                if (topCluster) {
+                    setSuggestion({
+                        action: 'suggest_new_folder',
+                        category: topCluster[0],
+                        sessionIds: topCluster[1].map(s => s.id),
+                    });
+                } else {
+                    setSuggestion(null);
+                }
+                return;
+            }
+
+            setLoading(true);
+            try {
+                const result = await suggestFolderAPI({
+                    user_id: getUserId(),
+                    session_id: recentSession.id,
+                    topic: recentSession.topic,
+                    problem_text: recentSession.topic,
+                });
+
+                if (result.action === 'add_to_folder' && result.folder_id) {
+                    // Check if this folder still exists
+                    const folderExists = folders.some(f => f.id === result.folder_id);
+                    if (folderExists) {
+                        setSuggestion({
+                            action: 'add_to_folder',
+                            folderId: result.folder_id,
+                            folderName: result.folder_name || 'Unknown Folder',
+                            sessionIds: [recentSession.id],
+                        });
+                    } else {
+                        // Folder was deleted, fall back to lexical
+                        setSuggestion(null);
+                    }
+                } else if (result.action === 'suggest_new_folder') {
+                    // Extract category from topic for new folder suggestion
+                    const parts = recentSession.topic.split(' - ');
+                    const category = parts.length >= 2 ? parts[1] : parts[0];
+
+                    // Find similar sessions by topic lexically as fallback
+                    const similar = unfiledSessions.filter(s => {
+                        const sParts = s.topic.split(' - ');
+                        const sCat = sParts.length >= 2 ? sParts[1] : sParts[0];
+                        return sCat === category;
+                    });
+
+                    if (similar.length >= 2) {
+                        setSuggestion({
+                            action: 'suggest_new_folder',
+                            category,
+                            sessionIds: similar.map(s => s.id),
+                        });
+                    } else {
+                        setSuggestion(null);
+                    }
+                } else {
+                    setSuggestion(null);
+                }
+            } catch {
+                // On error, fall back to lexical
+                const clusters = detectTopicClusters(unfiledSessions);
+                const topCluster = Array.from(clusters.entries())
+                    .filter(([cat]) => !dismissed.has(cat))
+                    .sort((a, b) => b[1].length - a[1].length)[0];
+
+                if (topCluster) {
+                    setSuggestion({
+                        action: 'suggest_new_folder',
+                        category: topCluster[0],
+                        sessionIds: topCluster[1].map(s => s.id),
+                    });
+                }
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchSuggestion();
+    }, [unfiledSessions, folders, dismissed]);
+
+    if (loading || !suggestion) return null;
+
+    const handleAction = () => {
+        if (suggestion.action === 'add_to_folder' && suggestion.folderId) {
+            // Add to existing folder
+            suggestion.sessionIds.forEach(id => {
+                onMoveToFolder(id, suggestion.folderId!);
+            });
+            setDismissed(prev => new Set(prev).add(suggestion.sessionIds[0]));
+        } else if (suggestion.action === 'suggest_new_folder' && suggestion.category) {
+            // Create new folder
+            const colors: FolderColor[] = ['purple', 'blue', 'green', 'amber', 'red'];
+            const colorIndex = Math.abs(suggestion.category.length) % colors.length;
+            const folderName = `${suggestion.category} Practice`;
+            const tempFolderId = `folder-${suggestion.category.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+
+            onCreateAndPopulateFolder(folderName, colors[colorIndex], suggestion.sessionIds);
+            syncFolder(getUserId(), tempFolderId, folderName);
+            setDismissed(prev => new Set(prev).add(suggestion.category!));
+        }
+    };
+
+    const handleDismiss = () => {
+        const key = suggestion.action === 'add_to_folder'
+            ? suggestion.sessionIds[0]
+            : suggestion.category!;
+        setDismissed(prev => new Set(prev).add(key));
+    };
+
+    return (
+        <div className="mb-4 bg-gradient-to-r from-purple-900/30 to-indigo-900/30 border border-purple-500/30 rounded-xl p-4">
+            <div className="flex items-start gap-3">
+                <div className="p-2 bg-purple-500/20 rounded-lg">
+                    <Brain className="h-5 w-5 text-purple-400" />
+                </div>
+                <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-medium text-white">Smart Grouping</span>
+                        <Sparkles className="h-3.5 w-3.5 text-purple-400" />
+                    </div>
+                    <p className="text-sm text-slate-300">
+                        {suggestion.action === 'add_to_folder' ? (
+                            <>Add to <span className="text-white font-medium">{suggestion.folderName}</span></>
+                        ) : (
+                            <>
+                                You have <span className="text-purple-400 font-medium">{suggestion.sessionIds.length} problems</span> about{' '}
+                                <span className="text-white font-medium">{suggestion.category}</span>
+                            </>
+                        )}
+                    </p>
+                    <div className="flex gap-2 mt-3">
+                        <button
+                            onClick={handleAction}
+                            className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-xs text-white transition-colors flex items-center gap-1.5"
+                        >
+                            <FolderPlus className="h-3.5 w-3.5" />
+                            {suggestion.action === 'add_to_folder' ? 'Add to Folder' : 'Create Folder'}
+                        </button>
+                        <button
+                            onClick={handleDismiss}
+                            className="px-3 py-1.5 border border-slate-600 hover:border-slate-500 rounded-lg text-xs text-slate-400 hover:text-white transition-colors"
+                        >
+                            Dismiss
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Legacy lexical clustering (used as fallback)
+function detectTopicClusters(sessions: HistorySession[]): Map<string, HistorySession[]> {
+    const clusters = new Map<string, HistorySession[]>();
+
+    sessions.filter(s => !s.folderId).forEach(session => {
+        const parts = session.topic.split(' - ');
+        const category = parts.length >= 2 ? parts[1] : parts[0];
+
+        if (!clusters.has(category)) {
+            clusters.set(category, []);
+        }
+        clusters.get(category)!.push(session);
+    });
+
+    clusters.forEach((sessions, key) => {
+        if (sessions.length < 2) clusters.delete(key);
+    });
+
+    return clusters;
 }
 
 // History Card Component
@@ -394,6 +614,7 @@ export function HistoryView({
     onClearAll,
     onSelectSession,
     onCreateFolder,
+    onCreateAndPopulateFolder,
     onDeleteFolder,
     onMoveToFolder,
     onBatchMove,
@@ -413,13 +634,20 @@ export function HistoryView({
     const folderGroups = folders.map(folder => ({
         folder,
         items: sessions.filter(s => s.folderId === folder.id)
-    })).filter(g => g.items.length > 0);
+    })); // Show all folders, even empty ones
 
     const unfiledItems = sessions.filter(s => !s.folderId);
 
     const handleCreateFolder = () => {
         if (newFolderName.trim()) {
-            onCreateFolder(newFolderName.trim(), newFolderColor);
+            const folderName = newFolderName.trim();
+            const tempFolderId = `folder-${folderName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+
+            onCreateFolder(folderName, newFolderColor);
+
+            // Sync folder to Backboard memory
+            syncFolder(getUserId(), tempFolderId, folderName);
+
             setNewFolderName('');
             setNewFolderColor('purple');
             setShowNewFolder(false);
@@ -493,6 +721,14 @@ export function HistoryView({
                     </button>
                 </div>
             </div>
+
+            {/* Smart Grouping Suggestion */}
+            <SmartGroupingSuggestion
+                sessions={sessions}
+                folders={folders}
+                onCreateAndPopulateFolder={onCreateAndPopulateFolder}
+                onMoveToFolder={onMoveToFolder}
+            />
 
             {/* New Folder Input */}
             {showNewFolder && (

@@ -21,6 +21,7 @@ class GraphState(TypedDict):
     input_content: str  # Text string or Base64 image
     user_id: str
     thread_id: str
+    backboard_thread_id: Optional[str]  # Backboard.io conversation thread for memory
     
     # --- Classification ---
     topic: Optional[str]

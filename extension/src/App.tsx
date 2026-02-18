@@ -10,8 +10,9 @@ import { SolutionView } from './components/SolutionView';
 import { PracticeView } from './components/PracticeView';
 import { HistoryView } from './components/HistoryView';
 import { YouTubeVideosView } from './components/YouTubeVideosView';
-import { Upload, X, Sparkles, Pin } from 'lucide-react';
-import { analyzeProblem, resumeWorkflow, generatePractice, getYouTubeResources, APIError, RateLimitError } from './lib/api';
+import { Upload, X, Sparkles, Pin, LogIn, LogOut, Cloud, HardDrive } from 'lucide-react';
+import { initAuth, onAuthChange, signInInteractive, signOut as authSignOut, type AuthState } from './lib/auth';
+import { analyzeProblem, resumeWorkflow, generatePractice, getYouTubeResources, APIError, RateLimitError, deleteProblem as deleteProblemMemory, deleteFolder as deleteFolderMemory } from './lib/api';
 import { getUserId } from './lib/utils';
 import { saveSession, getHistory, deleteSession, clearHistory, updateSession, getFolders, createFolder, deleteFolder as deleteFolderStorage, moveToFolder, batchMoveToFolder, batchMarkReviewed, batchDeleteSessions, type HistorySession, type Folder } from './lib/storage';
 import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep, VideoResource } from './lib/types';
@@ -41,12 +42,26 @@ function App() {
   const [videosOffset, setVideosOffset] = useState(0);
   const [videosHasMore, setVideosHasMore] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Auth state
+  const [authState, setAuthState] = useState<AuthState>({ mode: 'initializing', userId: '' });
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
 
-  // Load history and folders on mount
+  // Initialize auth + load history on mount
   useEffect(() => {
+    initAuth().then(setAuthState);
+    const unsub = onAuthChange(setAuthState);
     getHistory().then(setHistorySessions);
     getFolders().then(setFolders);
+    return unsub;
   }, []);
+
+  // Close account menu when clicking outside
+  useEffect(() => {
+    if (!showAccountMenu) return;
+    const handler = () => setShowAccountMenu(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [showAccountMenu]);
 
   const handleAnalyze = async (type: InputType, content: string) => {
     if (!content.trim()) {
@@ -313,6 +328,8 @@ function App() {
   const handleDeleteSession = async (sessionId: string) => {
     await deleteSession(sessionId);
     setHistorySessions(await getHistory());
+    // Sync deletion to Backboard memory (fire-and-forget)
+    deleteProblemMemory(getUserId(), sessionId);
   };
 
   // YouTube Videos Handlers
@@ -517,11 +534,23 @@ function App() {
             const newFolder = await createFolder(name, color);
             setFolders(prev => [...prev, newFolder]);
           }}
+          onCreateAndPopulateFolder={async (name, color, sessionIds) => {
+            // Create the folder first
+            const newFolder = await createFolder(name, color);
+            setFolders(prev => [...prev, newFolder]);
+
+            // Then move all sessions into the new folder
+            await batchMoveToFolder(sessionIds, newFolder.id);
+            const updated = await getHistory();
+            setHistorySessions(updated);
+          }}
           onDeleteFolder={async (folderId) => {
             await deleteFolderStorage(folderId);
             setFolders(prev => prev.filter(f => f.id !== folderId));
             const updated = await getHistory();
             setHistorySessions(updated);
+            // Sync deletion to Backboard memory (fire-and-forget)
+            deleteFolderMemory(getUserId(), folderId);
           }}
           onMoveToFolder={async (sessionId, folderId) => {
             await moveToFolder(sessionId, folderId);
@@ -680,7 +709,83 @@ Example: Solve for x: 2x + 5 = 13"
             </div>
             <h1 className="text-base font-semibold text-white">Stepwise</h1>
           </div>
+          {/* Auth status + account menu */}
           <div className="flex items-center gap-2">
+            {/* Auth status pill */}
+            {authState.mode !== 'initializing' && (
+              <div className="relative">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowAccountMenu((v) => !v);
+                  }}
+                  className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-full transition-colors
+                    hover:bg-white/10
+                    text-slate-400 hover:text-white"
+                  title={authState.mode === 'cloud' ? `Signed in as ${authState.email}` : 'Local mode'}
+                >
+                  {authState.mode === 'cloud' ? (
+                    <>
+                      <Cloud className="h-3 w-3 text-emerald-400" />
+                      <span className="max-w-[80px] truncate hidden sm:inline">{authState.email ?? 'Cloud'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <HardDrive className="h-3 w-3 text-amber-400" />
+                      <span className="hidden sm:inline">Local</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Account dropdown */}
+                {showAccountMenu && (
+                  <div className="absolute right-0 top-full mt-1 w-56 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 py-1 text-sm">
+                    {authState.mode === 'cloud' ? (
+                      <>
+                        <div className="px-3 py-2 border-b border-slate-700">
+                          <p className="text-white font-medium truncate">{authState.displayName ?? 'Signed in'}</p>
+                          <p className="text-slate-400 text-xs truncate">{authState.email}</p>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            setShowAccountMenu(false);
+                            await authSignOut();
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+                        >
+                          <LogOut className="h-3.5 w-3.5" />
+                          Sign out
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="px-3 py-2 border-b border-slate-700">
+                          <p className="text-slate-300 text-xs">Local mode — this device only</p>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            setShowAccountMenu(false);
+                            try {
+                              await signInInteractive();
+                            } catch (err) {
+                              const msg = err instanceof Error ? err.message : String(err);
+                              console.error('Sign-in failed:', msg);
+                              setError(`Sign-in failed: ${msg}`);
+                              setState('error');
+                            }
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-slate-300 hover:bg-white/5 hover:text-white transition-colors"
+                        >
+                          <LogIn className="h-3.5 w-3.5" />
+                          Sign in to enable sync
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {state === 'idle' && (
               <button
                 onClick={(e) => {
@@ -690,7 +795,6 @@ Example: Solve for x: 2x + 5 = 13"
                     try {
                       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                       if (tab?.windowId) {
-                        // Wait for the side panel to open before closing
                         chrome.runtime.sendMessage(
                           { action: 'openSidePanel', windowId: tab.windowId },
                           (response) => {

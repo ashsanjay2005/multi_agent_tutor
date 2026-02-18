@@ -18,8 +18,12 @@ class Settings(BaseSettings):
         extra="ignore"
     )
     
-    # Database
-    database_url: str = "postgresql://postgres:postgres@localhost:5432/math_tutor"
+    # Database (Supabase — used for LangGraph checkpointer)
+    database_url: str = ""  # Supabase connection pooler string
+    
+    # Supabase
+    supabase_url: str = ""      # e.g. https://xxx.supabase.co
+    supabase_service_key: str = ""  # Service role key (bypasses RLS)
     
     # API Keys
     openai_api_key: str = ""
@@ -45,9 +49,14 @@ class Settings(BaseSettings):
     confidence_threshold_low: float = 0.4
     confidence_threshold_high: float = 0.75
     
-    # LLM Model Names (Default: Google Gemini - GA Versions as of 2025)
-    vision_model: str = "gemini-2.0-flash"  # OpenAI: "gpt-4o"
-    text_model: str = "gemini-2.0-flash"  # OpenAI: "gpt-4o-mini"
+    # Default LLM Models
+    vision_model: str = "gemini-2.0-flash"
+    text_model: str = "gemini-2.0-flash"
+    
+    # Backboard.io Configuration
+    backboard_api_key: str = ""
+    # backboard_assistant_id is now PER-USER, stored in profiles table
+    backboard_assistant_name: str = "STEM Math Tutor"
     
     # Logging
     log_level: str = "INFO"

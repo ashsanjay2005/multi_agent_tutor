@@ -44,7 +44,10 @@ poetry.lock
 
 # Secrets / Keys
 keys/
-*.json
+
+# Data exports (not source code)
+chat_messages.json
+logs.json
 
 # Logs
 *.log
@@ -139,4 +142,10 @@ CONFIDENCE_FIX.md
 LCEL_REFACTOR.md
 
 .cursor
+
+supabase_export/
+
+# Ignore root node_modules and handoff docs
+node_modules/
+CURSOR_HANDOFF.md
 

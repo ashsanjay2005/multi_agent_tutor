@@ -33,6 +33,7 @@ class YouTubeResourcesState(TypedDict):
     problem_text: str
     topic: str
     offset: int  # For pagination (0, 3, 6, ...)
+    student_weakness: Optional[str]  # Gap-Fill: specific weakness to target
     
     # ConceptExtractor output
     key_concepts: list[str]
@@ -89,15 +90,26 @@ def concept_extractor_node(state: YouTubeResourcesState) -> dict:
         temperature=0.3,
     )
     
+    # Add Gap-Fill instruction if student has a weakness
+    gap_fill_instruction = ""
+    student_weakness = state.get("student_weakness")
+    if student_weakness:
+        gap_fill_instruction = f"""
+GAP-FILL PRIORITY: The student struggles with "{student_weakness}". 
+Generate at least ONE search query specifically targeting this weakness, like:
+"{student_weakness} tutorial explained simply" or "{student_weakness} common mistakes"
+"""
+        logger.info(f"[ConceptExtractor] Gap-Fill targeting: {student_weakness}")
+    
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a STEM education specialist. Given a math problem and its topic, 
+        ("system", f"""You are a STEM education specialist. Given a math problem and its topic, 
 extract the key concepts and generate YouTube search queries that will find helpful tutorial videos.
 
 Focus on:
 - Core mathematical operations (e.g., "matrix adjoint", "cross product")
 - General topic tutorials (e.g., "linear algebra matrices")
 - Step-by-step guides (e.g., "how to find inverse matrix")
-
+{gap_fill_instruction}
 Make search queries natural and YouTube-friendly."""),
         ("human", """Problem: {problem_text}
 Topic: {topic}

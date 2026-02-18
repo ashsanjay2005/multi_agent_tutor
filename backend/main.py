@@ -24,6 +24,8 @@ from rate_limiter import (
 )
 from cache import init_video_cache, get_video_cache
 from youtube_resources_graph import get_youtube_graph, YouTubeResourcesState
+from backboard_client import get_backboard_service, is_backboard_available
+import supabase_client
 
 # Configure logging
 logging.basicConfig(
@@ -139,16 +141,91 @@ class ResourcesResponse(BaseModel):
     has_more: bool
     total_fetched: int
 
+
+# Student Profiling models (Backboard diagnostic logging)
+class LogBreakdownRequest(BaseModel):
+    """Request to log when a student clicks 'breakdown' on a step."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    step_title: str = Field(..., description="Title of the step being broken down")
+    concept: str = Field(..., description="Normalized concept tag (e.g., 'negative_signs', 'matrix_multiplication')")
+    context: str = Field(..., description="Problem statement or step explanation")
+
+
+class LogQuizResultRequest(BaseModel):
+    """Request to log a quiz/practice result."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    concept: str = Field(..., description="Concept being tested (e.g., 'cross_product')")
+    correct: bool = Field(..., description="Whether the answer was correct")
+    question_summary: str = Field(..., description="Brief summary of the question")
+
+
+class SyncFolderRequest(BaseModel):
+    """Request to sync folder definition to Backboard memory."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    folder_id: str = Field(..., description="Unique folder identifier")
+    folder_name: str = Field(..., description="Current folder name")
+
+
+class SuggestFolderRequest(BaseModel):
+    """Request to get semantic folder suggestion for a problem."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    session_id: str = Field(..., description="Current session/problem ID")
+    topic: str = Field(..., description="Problem topic")
+    problem_text: str = Field(..., description="Problem text for semantic matching")
+
+
+class FolderSuggestionResponse(BaseModel):
+    """Semantic folder suggestion result."""
+    action: str = Field(..., description="'add_to_folder' | 'suggest_new_folder' | 'no_suggestion'")
+    folder_id: Optional[str] = Field(None, description="Suggested folder ID")
+    folder_name: Optional[str] = Field(None, description="Suggested folder name")
+    similarity_score: float = Field(0.0, description="Match confidence 0-1")
+    similar_unfiled: list[dict] = Field(default_factory=list, description="Similar unfiled problems")
+    alternate_folder: Optional[dict] = Field(None, description="Did you mean? alternative")
+
+
+class DeleteFolderRequest(BaseModel):
+    """Request to delete folder from Backboard memory."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    folder_id: str = Field(..., description="Folder ID to delete")
+
+
+class DeleteProblemRequest(BaseModel):
+    """Request to delete problem from Backboard memory."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    session_id: str = Field(..., description="Session/problem ID to delete")
+
+
+class SimilarProblemsRequest(BaseModel):
+    """Request to find semantically similar problems."""
+    user_id: str = Field(..., description="User ID for thread lookup")
+    topic: str = Field(..., description="Current problem topic")
+    problem_text: str = Field(..., description="Current problem text")
+
+
+class SimilarProblem(BaseModel):
+    """A similar problem found in memory."""
+    topic: str
+    similarity: float
+
+
+class SimilarProblemsResponse(BaseModel):
+    """Response with similar problems for grouping suggestions."""
+    similar_problems: list[SimilarProblem]
+    suggested_folder_name: str | None = None
+
 # ============================================================================
 # LIFECYCLE & APP
 # ============================================================================
 
-app_graph = None
+app_graph = None          # Lightweight graph (no checkpointer) — default
+app_graph_ckpt = None     # Checkpointed graph — for disambiguation/resume only
 video_cache = None
+_db_pool = None  # Connection pool — closed on shutdown
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global app_graph
+    global app_graph, app_graph_ckpt, _db_pool
     logger.info("Starting up AI Math Tutor Backend...")
     
     # Initialize rate limiter
@@ -163,10 +240,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Rate limiter unavailable (Redis connection failed): {e}")
     
-    # Initialize graph
+    # Initialize graph + connection pool (dual graph: lightweight + checkpointed)
     try:
-        app_graph = await get_graph()
-        logger.info("LangGraph workflow initialized successfully")
+        _db_pool, app_graph_ckpt, app_graph = await get_graph()
+        logger.info("LangGraph workflow initialized (lightweight + checkpointed)")
     except Exception as e:
         logger.error(f"Failed to initialize graph: {e}")
         raise
@@ -179,10 +256,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Video cache unavailable: {e}")
     
+    # Initialize Backboard.io for persistent memory
+    if is_backboard_available():
+        try:
+            await get_backboard_service()
+            logger.info("Backboard.io initialized with LoCoMo memory enabled")
+        except Exception as e:
+            logger.warning(f"Backboard.io unavailable: {e}")
+    else:
+        logger.info("Backboard.io not configured (no BACKBOARD_API_KEY)")
+    
+    # Ensure Supabase Storage bucket exists for image offload
+    try:
+        await supabase_client.ensure_storage_bucket()
+        logger.info("Supabase Storage bucket ready")
+    except Exception as e:
+        logger.warning(f"Supabase Storage bucket setup failed (non-critical): {e}")
+    
     yield
     
     # Cleanup
     logger.info("Shutting down...")
+    if _db_pool:
+        await _db_pool.close()
+        logger.info("Database pool closed")
     await close_rate_limiter()
 
 app = FastAPI(
@@ -262,11 +359,33 @@ async def analyze_problem(request: AnalyzeRequest):
     logger.info(f"[Analyze] Request Type: {request.type}, Thread: {thread_id}")
     
     try:
+        # Get or create Backboard thread for persistent memory
+        backboard_thread_id = None
+        if is_backboard_available():
+            try:
+                backboard = await get_backboard_service()
+                backboard_thread_id = await backboard.get_or_create_thread(request.user_id)
+            except Exception as e:
+                logger.warning(f"Backboard thread creation failed: {e}")
+        
+        # Offload images to Supabase Storage (reduces checkpoint blob size ~80%)
+        content_for_state = request.content
+        if request.type == "image":
+            try:
+                image_url = await supabase_client.upload_image(
+                    request.content, thread_id
+                )
+                content_for_state = image_url
+                logger.info(f"[Analyze] Image offloaded to storage: {image_url[:80]}...")
+            except Exception as e:
+                logger.warning(f"[Analyze] Image upload failed, using base64 fallback: {e}")
+        
         initial_state: GraphState = {
             "input_type": request.type,
-            "input_content": request.content,
+            "input_content": content_for_state,
             "user_id": request.user_id,
             "thread_id": thread_id,
+            "backboard_thread_id": backboard_thread_id,
             "topic": None,
             "confidence_score": 0.0,
             "detected_ambiguity": False,
@@ -280,12 +399,64 @@ async def analyze_problem(request: AnalyzeRequest):
             "requires_user_action": False
         }
         
-        config = {"configurable": {"thread_id": thread_id}}
-        result = await app_graph.ainvoke(initial_state, config)
+        # Use lightweight (non-checkpointed) graph by default — zero checkpoint overhead
+        result = await app_graph.ainvoke(initial_state)
         
         response_status = "completed"
         if result["requires_user_action"]:
             response_status = "requires_disambiguation" if result.get("candidate_topics") else "requires_clarification"
+        
+        # Persist session + messages to Supabase (fire-and-forget, non-blocking)
+        try:
+            session = await supabase_client.create_session(
+                user_id=request.user_id,
+                title=result.get("input_content", "")[:100],
+                topic=result.get("topic", ""),
+                model=settings.text_model,
+                langgraph_thread_id=thread_id,
+            )
+            session_id = session["id"]
+            
+            # Save user message
+            await supabase_client.save_message(
+                session_id=session_id,
+                user_id=request.user_id,
+                role="user",
+                content_text=request.content[:500] if request.type == "text" else "[image]",
+            )
+            
+            # Save assistant response
+            await supabase_client.save_message(
+                session_id=session_id,
+                user_id=request.user_id,
+                role="assistant",
+                content_text=result.get("worked_example", "")[:500],
+                content_json={
+                    "solution_steps": result.get("solution_steps"),
+                    "final_answer": result.get("worked_example"),
+                    "topic": result.get("topic"),
+                    "confidence": result.get("confidence_score"),
+                },
+            )
+            # Save to saved_problems table
+            await supabase_client.save_problem(
+                user_id=request.user_id,
+                problem_text=(
+                    request.content[:500]
+                    if request.type == "text"
+                    else result.get("topic", "image problem")
+                ),
+                topic=result.get("topic", ""),
+                solution_summary=result.get("worked_example", "")[:500],
+                solution_json={
+                    "solution_steps": result.get("solution_steps"),
+                    "final_answer": result.get("worked_example"),
+                },
+                source=request.type,
+            )
+            logger.info(f"[Analyze] Persisted session {session_id} + problem to Supabase")
+        except Exception as e:
+            logger.warning(f"[Analyze] Supabase persistence failed (non-critical): {e}")
         
         return AnalyzeResponse(
             thread_id=thread_id,
@@ -305,13 +476,13 @@ async def analyze_problem(request: AnalyzeRequest):
 
 @app.post("/v1/resume", response_model=AnalyzeResponse)
 async def resume_workflow(request: ResumeRequest):
-    global app_graph
-    if app_graph is None:
+    global app_graph_ckpt
+    if app_graph_ckpt is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Graph not initialized")
     
     try:
         config = {"configurable": {"thread_id": request.thread_id}}
-        state = await app_graph.aget_state(config)
+        state = await app_graph_ckpt.aget_state(config)
         
         if not state:
              raise HTTPException(status.HTTP_404_NOT_FOUND, "Thread not found")
@@ -325,9 +496,9 @@ async def resume_workflow(request: ResumeRequest):
         }
         
         # In v0.2, we update state and create a new run
-        await app_graph.aupdate_state(config, updated_state)
+        await app_graph_ckpt.aupdate_state(config, updated_state)
         # Invoke with None input to resume execution from current state
-        final_state = await app_graph.ainvoke(None, config)
+        final_state = await app_graph_ckpt.ainvoke(None, config)
         
         return AnalyzeResponse(
             thread_id=request.thread_id,
@@ -446,8 +617,6 @@ Set is_atomic: true if this step cannot be meaningfully decomposed."""
         # Fix common JSON escape issues with LaTeX backslashes
         # The LLM often returns unescaped backslashes in LaTeX
         import re
-        # Replace single backslashes that aren't already escaped or valid JSON escapes
-        # Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
         def fix_backslashes(s):
             result = []
             i = 0
@@ -535,6 +704,7 @@ class PracticeRequest(BaseModel):
     topic: str = Field(..., description="The topic to generate practice problems for")
     original_problem: str = Field(..., description="The original problem for context")
     num_questions: int = Field(default=3, ge=1, le=5)
+    user_id: str = Field(default="anonymous", description="User ID for profile-aware generation")
 
 
 class PracticeQuestion(BaseModel):
@@ -553,7 +723,7 @@ class PracticeResponse(BaseModel):
 
 @app.post("/v1/practice", response_model=PracticeResponse)
 async def generate_practice(request: PracticeRequest):
-    """Generate practice problems on-demand (only when user clicks the button)."""
+    """Generate practice problems on-demand, adapted to student's profile."""
     logger.info(f"[Practice] Generating {request.num_questions} questions for: {request.topic}")
     
     from langchain_google_genai import ChatGoogleGenerativeAI
@@ -567,10 +737,31 @@ async def generate_practice(request: PracticeRequest):
         temperature=0.7  # Slight variation for diverse questions
     )
     
+    # Get student profile for adaptive question generation
+    profile_context = ""
+    if is_backboard_available():
+        try:
+            from backboard_client import get_backboard_service
+            backboard = await get_backboard_service()
+            thread_id = await backboard.get_or_create_thread(request.user_id or "anonymous")
+            profile = await backboard.get_student_profile(thread_id, request.topic)
+            
+            if profile.has_history:
+                if profile.weak_concepts:
+                    profile_context += f"\nFOCUS ON WEAKNESS: Include extra questions testing: {', '.join(profile.weak_concepts[:3])}"
+                    profile_context += "\nMake these questions simpler and more foundational to build confidence."
+                if profile.strong_concepts:
+                    profile_context += f"\nSKIP BASICS ON: {', '.join(profile.strong_concepts[:3])} (student has mastered these)"
+                    profile_context += "\nMake questions on these topics more challenging."
+            logger.info(f"[Practice] Using profile: {len(profile.weak_concepts)} weaknesses, {len(profile.strong_concepts)} strengths")
+        except Exception as e:
+            logger.warning(f"[Practice] Could not get profile: {e}")
+    
     try:
         prompt = f"""Generate {request.num_questions} multiple choice practice questions on the topic: {request.topic}
 
 Original problem for context: {request.original_problem}
+{profile_context}
 
 Create questions that test the same concept but with different numbers/scenarios.
 Each question should have 4 options (A, B, C, D) with only one correct answer.
@@ -648,7 +839,23 @@ async def get_youtube_resources(request: ResourcesRequest):
                 total_fetched=request.offset + len(cached_videos)
             )
     
-    # 2. Run the YouTube resources graph
+    # 2. Get student profile for Gap-Fill video queries
+    student_weakness = None
+    if is_backboard_available() and hasattr(request, 'user_id') and request.user_id:
+        try:
+            from backboard_client import get_backboard_service
+            backboard = await get_backboard_service()
+            thread_id = await backboard.get_or_create_thread(request.user_id)
+            profile = await backboard.get_student_profile(thread_id, request.topic)
+            
+            if profile.weak_concepts:
+                # Use the most relevant weakness for Gap-Fill queries
+                student_weakness = profile.weak_concepts[0]
+                logger.info(f"[Resources] Gap-Fill targeting weakness: {student_weakness}")
+        except Exception as e:
+            logger.warning(f"[Resources] Could not get profile for Gap-Fill: {e}")
+    
+    # 3. Run the YouTube resources graph
     try:
         graph = get_youtube_graph()
         
@@ -656,6 +863,7 @@ async def get_youtube_resources(request: ResourcesRequest):
             "problem_text": request.problem_text,
             "topic": request.topic,
             "offset": request.offset,
+            "student_weakness": student_weakness,  # Gap-Fill query targeting
             "key_concepts": [],
             "search_queries": [],
             "raw_videos": [],
@@ -665,7 +873,7 @@ async def get_youtube_resources(request: ResourcesRequest):
         result = await graph.ainvoke(initial_state)
         annotated_videos = result.get("annotated_videos", [])
         
-        # 3. Cache the results
+        # 4. Cache the results
         if cache and annotated_videos:
             await cache.set(request.problem_id, request.offset, annotated_videos)
         
@@ -697,7 +905,301 @@ async def get_youtube_resources(request: ResourcesRequest):
         )
 
 
+# ============================================================================
+# STUDENT PROFILING ENDPOINTS (Backboard Diagnostic Logging)
+# ============================================================================
+
+@app.post("/v1/log_breakdown", status_code=status.HTTP_200_OK)
+async def log_breakdown(request: LogBreakdownRequest):
+    """
+    Log when a student clicks 'breakdown' on a step.
+    This shadow-saves the interaction to Backboard for profiling.
+    """
+    logger.info(f"[LogBreakdown] user={request.user_id}, concept={request.concept}")
+    
+    if not is_backboard_available():
+        return {"status": "skipped", "message": "Backboard not configured"}
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        await backboard.log_struggle(
+            thread_id=thread_id,
+            step_title=request.step_title,
+            concept=request.concept,
+            context=request.context
+        )
+        
+        return {"status": "logged", "concept": request.concept}
+        
+    except Exception as e:
+        logger.error(f"[LogBreakdown] Error: {e}", exc_info=True)
+        # Non-critical - don't fail the request
+        return {"status": "error", "message": str(e)[:100]}
+
+
+@app.post("/v1/log_quiz_result", status_code=status.HTTP_200_OK)
+async def log_quiz_result(request: LogQuizResultRequest):
+    """
+    Log quiz/practice results for student profiling.
+    Tracks mastery and struggle patterns.
+    """
+    logger.info(f"[LogQuizResult] user={request.user_id}, concept={request.concept}, correct={request.correct}")
+    
+    if not is_backboard_available():
+        return {"status": "skipped", "message": "Backboard not configured"}
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        await backboard.log_quiz_result(
+            thread_id=thread_id,
+            concept=request.concept,
+            correct=request.correct,
+            question_summary=request.question_summary
+        )
+        
+        return {"status": "logged", "concept": request.concept, "correct": request.correct}
+        
+    except Exception as e:
+        logger.error(f"[LogQuizResult] Error: {e}", exc_info=True)
+        # Non-critical - don't fail the request
+        return {"status": "error", "message": str(e)[:100]}
+
+
+@app.post("/v1/similar_problems", response_model=SimilarProblemsResponse)
+async def find_similar_problems_endpoint(request: SimilarProblemsRequest):
+    """
+    Find semantically similar problems from Backboard memory.
+    Used for smart grouping suggestions in history view.
+    """
+    logger.info(f"[SimilarProblems] user={request.user_id}, topic={request.topic}")
+    
+    if not is_backboard_available():
+        return SimilarProblemsResponse(similar_problems=[], suggested_folder_name=None)
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        similar = await backboard.find_similar_problems(
+            thread_id=thread_id,
+            query_topic=request.topic,
+            query_problem=request.problem_text
+        )
+        
+        # Convert to response model
+        similar_problems = [
+            SimilarProblem(topic=p["topic"], similarity=p["similarity"])
+            for p in similar
+        ]
+        
+        # Generate suggested folder name if we found similar problems
+        suggested_name = None
+        if similar_problems:
+            # Use most common topic category
+            base_topic = request.topic.split(" - ")[1] if " - " in request.topic else request.topic
+            suggested_name = f"{base_topic} Practice"
+        
+        return SimilarProblemsResponse(
+            similar_problems=similar_problems,
+            suggested_folder_name=suggested_name
+        )
+        
+    except Exception as e:
+        logger.error(f"[SimilarProblems] Error: {e}", exc_info=True)
+        return SimilarProblemsResponse(similar_problems=[], suggested_folder_name=None)
+
+
+# ============================================================================
+# SEMANTIC FOLDER MANAGEMENT
+# ============================================================================
+
+@app.post("/v1/sync_folder", status_code=status.HTTP_200_OK)
+async def sync_folder(request: SyncFolderRequest):
+    """
+    Sync folder definition to Backboard memory.
+    Called when folder is created or renamed to keep Folder Map updated.
+    """
+    logger.info(f"[SyncFolder] user={request.user_id}, folder={request.folder_id} -> {request.folder_name}")
+    
+    if not is_backboard_available():
+        return {"status": "skipped", "message": "Backboard not configured"}
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        await backboard.save_folder_definition(
+            thread_id=thread_id,
+            folder_id=request.folder_id,
+            folder_name=request.folder_name
+        )
+        
+        return {"status": "synced", "folder_id": request.folder_id}
+        
+    except Exception as e:
+        logger.error(f"[SyncFolder] Error: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)[:100]}
+
+
+@app.post("/v1/suggest_folder", response_model=FolderSuggestionResponse)
+async def suggest_folder(request: SuggestFolderRequest):
+    """
+    Get semantic folder suggestion for a problem.
+    Uses Backboard memory search with 0.85 similarity threshold.
+    """
+    logger.info(f"[SuggestFolder] user={request.user_id}, topic={request.topic}")
+    
+    if not is_backboard_available():
+        return FolderSuggestionResponse(action="no_suggestion")
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        suggestion = await backboard.find_folder_for_problem(
+            thread_id=thread_id,
+            problem_text=request.problem_text,
+            topic=request.topic
+        )
+        
+        return FolderSuggestionResponse(
+            action=suggestion.action,
+            folder_id=suggestion.folder_id,
+            folder_name=suggestion.folder_name,
+            similarity_score=suggestion.similarity_score,
+            similar_unfiled=suggestion.similar_unfiled,
+            alternate_folder=suggestion.alternate_folder
+        )
+        
+    except Exception as e:
+        logger.error(f"[SuggestFolder] Error: {e}", exc_info=True)
+        return FolderSuggestionResponse(action="no_suggestion")
+
+
+@app.post("/v1/delete_folder", status_code=status.HTTP_200_OK)
+async def delete_folder_memory(request: DeleteFolderRequest):
+    """
+    Delete folder definition from Backboard memory.
+    Called when folder is deleted to prevent stale suggestions.
+    """
+    logger.info(f"[DeleteFolder] user={request.user_id}, folder={request.folder_id}")
+    
+    if not is_backboard_available():
+        return {"status": "skipped", "message": "Backboard not configured"}
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        await backboard.delete_folder_definition(
+            thread_id=thread_id,
+            folder_id=request.folder_id
+        )
+        
+        return {"status": "deleted", "folder_id": request.folder_id}
+        
+    except Exception as e:
+        logger.error(f"[DeleteFolder] Error: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)[:100]}
+
+
+@app.post("/v1/delete_problem", status_code=status.HTTP_200_OK)
+async def delete_problem_memory(request: DeleteProblemRequest):
+    """
+    Delete problem from Backboard memory.
+    Called when problem is deleted to exclude from similarity searches.
+    """
+    logger.info(f"[DeleteProblem] user={request.user_id}, session={request.session_id}")
+    
+    if not is_backboard_available():
+        return {"status": "skipped", "message": "Backboard not configured"}
+    
+    try:
+        backboard = await get_backboard_service()
+        thread_id = await backboard.get_or_create_thread(request.user_id)
+        
+        await backboard.delete_problem_memory(
+            thread_id=thread_id,
+            session_id=request.session_id
+        )
+        
+        return {"status": "deleted", "session_id": request.session_id}
+        
+    except Exception as e:
+        logger.error(f"[DeleteProblem] Error: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)[:100]}
+
+# ============================================================================
+# SUPABASE SESSION HISTORY ENDPOINTS
+# ============================================================================
+
+class SessionListItem(BaseModel):
+    """Lightweight session preview for the sidebar."""
+    id: str
+    title: Optional[str] = None
+    topic: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class SessionMessagesResponse(BaseModel):
+    """Full message list for a session."""
+    session_id: str
+    messages: list[dict]
+
+
+class FeedbackRequest(BaseModel):
+    """User feedback on a session or message."""
+    user_id: str = Field(...)
+    rating: int = Field(..., ge=1, le=5)
+    session_id: Optional[str] = None
+    message_id: Optional[str] = None
+    comment: str = ""
+
+
+@app.get("/v1/sessions", response_model=list[SessionListItem])
+async def list_sessions(
+    user_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    include_archived: bool = False,
+):
+    """Get paginated session list for a user."""
+    sessions = await supabase_client.get_user_sessions(
+        user_id=user_id,
+        limit=limit,
+        offset=offset,
+        include_archived=include_archived,
+    )
+    return [SessionListItem(**s) for s in sessions]
+
+
+@app.get("/v1/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
+async def get_session_messages(session_id: str, user_id: str):
+    """Get all messages for a session."""
+    messages = await supabase_client.get_session_messages(
+        session_id=session_id,
+        user_id=user_id,
+    )
+    return SessionMessagesResponse(session_id=session_id, messages=messages)
+
+
+@app.post("/v1/feedback", status_code=status.HTTP_201_CREATED)
+async def submit_feedback(request: FeedbackRequest):
+    """Submit user feedback on a session or message."""
+    result = await supabase_client.save_feedback(
+        user_id=request.user_id,
+        rating=request.rating,
+        session_id=request.session_id,
+        message_id=request.message_id,
+        comment=request.comment,
+    )
+    return {"status": "saved", "feedback_id": result.get("id")}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=settings.backend_port, reload=True)
-
