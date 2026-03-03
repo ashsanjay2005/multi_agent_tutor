@@ -790,37 +790,64 @@ async def get_graph():
     
     The caller MUST store the pool reference and call `await pool.close()`
     during application shutdown.
+    
+    Retries up to 3 times with exponential backoff to handle transient
+    Supabase PgBouncer DNS issues (e.g., after project unpause).
     """
-    # 1. Create Async Connection Pool — Nano tier safe
-    #    open=False prevents the deprecated auto-open in the constructor.
-    #    We call pool.open() explicitly below.
-    pool = AsyncConnectionPool(
-        conninfo=settings.database_url,
-        min_size=0,       # Allow closing ALL idle connections (best for Supabase)
-        max_size=3,       # Nano tier limit
-        open=False,
-        max_lifetime=60,  # Recycle connections every 60s
-        num_workers=1,    # Serialize connection creation to avoid storms
-        kwargs={
-            "autocommit": True, 
-            "prepare_threshold": None,  # Disable prepared statements
-            "keepalives": 1,
-            "keepalives_idle": 20,
-            "keepalives_interval": 10,
-            "keepalives_count": 5,
-        },
-    )
-    await pool.open()     # Explicit, awaitable open — no warnings
+    import asyncio
+    
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(1, max_retries + 1):
+        pool = None
+        try:
+            # 1. Create Async Connection Pool — Nano tier safe
+            pool = AsyncConnectionPool(
+                conninfo=settings.database_url,
+                min_size=0,       # Allow closing ALL idle connections (best for Supabase)
+                max_size=3,       # Nano tier limit
+                open=False,
+                max_lifetime=60,  # Recycle connections every 60s
+                num_workers=1,    # Serialize connection creation to avoid storms
+                timeout=10,       # Connection timeout in seconds
+                kwargs={
+                    "autocommit": True, 
+                    "prepare_threshold": None,  # Disable prepared statements
+                    "keepalives": 1,
+                    "keepalives_idle": 20,
+                    "keepalives_interval": 10,
+                    "keepalives_count": 5,
+                },
+            )
+            await pool.open()     # Explicit, awaitable open — no warnings
 
-    # 2. Create Async Checkpointer on the open pool
-    checkpointer = AsyncPostgresSaver(pool)
+            # 2. Create Async Checkpointer on the open pool
+            checkpointer = AsyncPostgresSaver(pool)
 
-    # 3. Setup checkpoint tables (idempotent CREATE IF NOT EXISTS)
-    await checkpointer.setup()
+            # 3. Setup checkpoint tables (idempotent CREATE IF NOT EXISTS)
+            await checkpointer.setup()
 
-    # 4. Build both graph variants
-    checkpointed_graph = create_stem_tutor_graph(checkpointer=checkpointer)
-    lightweight_graph = create_stem_tutor_graph(checkpointer=None)
-
-    return pool, checkpointed_graph, lightweight_graph
+            # 4. Build both graph variants
+            checkpointed_graph = create_stem_tutor_graph(checkpointer=checkpointer)
+            lightweight_graph = create_stem_tutor_graph(checkpointer=None)
+            
+            logger.info(f"Database pool connected successfully (attempt {attempt})")
+            return pool, checkpointed_graph, lightweight_graph
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Database connection attempt {attempt}/{max_retries} failed: {e}")
+            # Clean up the failed pool
+            if pool:
+                try:
+                    await pool.close()
+                except Exception:
+                    pass
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # 2s, 4s
+                logger.info(f"Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+    
+    raise RuntimeError(f"Failed to connect to database after {max_retries} attempts: {last_error}")
 

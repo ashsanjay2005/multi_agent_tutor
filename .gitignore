@@ -149,3 +149,8 @@ supabase_export/
 node_modules/
 CURSOR_HANDOFF.md
 
+
+# Ignore local scripts
+pull_supabase.js
+package.json
+package-lock.json

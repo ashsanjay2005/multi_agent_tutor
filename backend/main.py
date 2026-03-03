@@ -245,8 +245,10 @@ async def lifespan(app: FastAPI):
         _db_pool, app_graph_ckpt, app_graph = await get_graph()
         logger.info("LangGraph workflow initialized (lightweight + checkpointed)")
     except Exception as e:
-        logger.error(f"Failed to initialize graph: {e}")
-        raise
+        logger.error(f"Failed to initialize graph (will retry on first request): {e}")
+        # Don't crash — let the container start so Cloud Run's startup probe passes.
+        # The /health endpoint will work, and /v1/analyze will return 503 until
+        # the graph is lazily initialized on the next attempt.
     
     # Initialize video cache
     global video_cache
@@ -326,9 +328,17 @@ async def get_quota(user_id: str = "anonymous"):
 
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
 async def analyze_problem(request: AnalyzeRequest):
-    global app_graph
+    global app_graph, app_graph_ckpt, _db_pool
+    
+    # Lazy init: if graph failed during startup, retry now
     if app_graph is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Graph not initialized")
+        try:
+            logger.info("Graph not initialized — attempting lazy initialization...")
+            _db_pool, app_graph_ckpt, app_graph = await get_graph()
+            logger.info("Lazy graph initialization succeeded!")
+        except Exception as e:
+            logger.error(f"Lazy graph initialization failed: {e}")
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Database unavailable: {e}")
     
     # Check rate limit
     try:

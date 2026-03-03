@@ -38,7 +38,7 @@
     ]
   },
   "host_permissions": [
-    "http://localhost:8000/*"
+    "https://stepwise-backend-873376819767.northamerica-northeast2.run.app/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
