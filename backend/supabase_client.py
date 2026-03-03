@@ -309,14 +309,13 @@ async def get_cached_videos(problem_hash: str) -> Optional[dict]:
 
 
 async def cache_videos(
-    problem_hash: str, videos: list[dict], grade_level: str = ""
+    problem_hash: str, videos: list[dict]
 ) -> None:
     """Cache YouTube results for a problem hash."""
     client = get_supabase()
     client.table("video_cache").upsert({
         "problem_hash": problem_hash,
         "videos": videos,
-        "grade_level": grade_level,
     }, on_conflict="problem_hash").execute()
 
 
