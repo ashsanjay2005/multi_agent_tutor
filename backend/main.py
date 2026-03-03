@@ -3,6 +3,7 @@ FastAPI Application for AI Math Tutor Backend
 """
 
 import logging
+import asyncio
 import uuid
 from typing import Literal, Optional
 from contextlib import asynccontextmanager
@@ -240,15 +241,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Rate limiter unavailable (Redis connection failed): {e}")
     
-    # Initialize graph + connection pool (dual graph: lightweight + checkpointed)
-    try:
-        _db_pool, app_graph_ckpt, app_graph = await get_graph()
-        logger.info("LangGraph workflow initialized (lightweight + checkpointed)")
-    except Exception as e:
-        logger.error(f"Failed to initialize graph (will retry on first request): {e}")
-        # Don't crash — let the container start so Cloud Run's startup probe passes.
-        # The /health endpoint will work, and /v1/analyze will return 503 until
-        # the graph is lazily initialized on the next attempt.
+    # Initialize graph + connection pool in the BACKGROUND
+    # This is critical so Uvicorn can start listening on the port immediately,
+    # otherwise Cloud Run health checks will kill the container while we retry.
+    async def init_graph_bg():
+        global _db_pool, app_graph_ckpt, app_graph
+        try:
+            pool, ckpt, graph = await get_graph()
+            _db_pool = pool
+            app_graph_ckpt = ckpt
+            app_graph = graph
+            logger.info("LangGraph workflow initialized successfully in background")
+        except Exception as e:
+            logger.error(f"Background graph init failed (will retry on first request): {e}")
+
+    asyncio.create_task(init_graph_bg())
     
     # Initialize video cache
     global video_cache
