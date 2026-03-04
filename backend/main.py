@@ -1492,7 +1492,8 @@ Create a well-organized cheat sheet in **Markdown format** with the following st
 - Include precise mathematical definitions where relevant
 
 ## Essential Formulas & Theorems
-- List all important formulas using LaTeX notation ($formula$)
+- List all important formulas cleanly using readable Unicode text (e.g., y = mx + b)
+- Do NOT use raw LaTeX commands; Google Docs cannot natively render them.
 - Include when and how to apply each formula
 
 ## Problem-Solving Strategies
@@ -1515,7 +1516,7 @@ RULES:
 1. Use Markdown headings (## for sections, ### for subsections)
 2. Use **bold** for key terms
 3. Use bullet points for lists
-4. Use $...$ for LaTeX math expressions
+4. VERY IMPORTANT: Do NOT use raw LaTeX (like \lambda, \frac, or \begin{{bmatrix}}). Instead, use plain text with Unicode math symbols (e.g., λ, x², 1/2). Format matrices simply like [[1, 2], [3, 4]].
 5. Keep it concise — this is a CHEAT SHEET, not a textbook
 6. Focus on the specific topics from the problems above
 7. Make it immediately useful for exam preparation"""

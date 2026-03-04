@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, Trash2, BookOpen, FolderPlus, Folder, Folder
 import type { HistorySession, Folder as FolderType, FolderColor } from '../lib/storage';
 import { syncFolder, suggestFolder as suggestFolderAPI, generateCheatSheet } from '../lib/api';
 import { getUserId } from '../lib/utils';
-import { getGoogleDocsAccessToken } from '../lib/auth';
+import { getGoogleDocsAccessToken, removeCachedAuthToken } from '../lib/auth';
 
 // Color mappings
 const FOLDER_COLORS: Record<FolderColor, { bg: string; border: string; text: string; accent: string }> = {
@@ -496,8 +496,10 @@ function FolderAccordion({
         setCheatSheetLoading(true);
         setCheatSheetError(null);
         setCheatSheetUrl(null);
+
+        let currentToken = '';
         try {
-            const accessToken = await getGoogleDocsAccessToken();
+            currentToken = await getGoogleDocsAccessToken();
             const problems = items.map(s => ({
                 problem: s.problem,
                 topic: s.topic,
@@ -507,13 +509,21 @@ function FolderAccordion({
                 getUserId(),
                 folder.name,
                 problems,
-                accessToken,
+                currentToken,
             );
             setCheatSheetUrl(result.doc_url);
             window.open(result.doc_url, '_blank');
         } catch (e: any) {
             console.error('[CheatSheet] Failed:', e);
-            setCheatSheetError(e.message || 'Failed to create cheat sheet');
+            let errMsg = e.message || 'Failed to create cheat sheet';
+
+            // If we get an auth/scope error from Google Docs (often 403 or 401, or wrapped as 502)
+            if (currentToken && (errMsg.includes('403') || errMsg.includes('401') || e.status === 401 || e.status === 403 || e.status === 502)) {
+                await removeCachedAuthToken(currentToken).catch(console.error);
+                errMsg += ' (Cleared stale Google Auth. Please try again to re-authorize.)';
+            }
+
+            setCheatSheetError(errMsg);
         } finally {
             setCheatSheetLoading(false);
         }

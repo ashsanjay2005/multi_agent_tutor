@@ -342,3 +342,16 @@ export async function getGoogleDocsAccessToken(): Promise<string> {
         });
     });
 }
+
+/**
+ * Remove a cached Google Auth token.
+ * Useful when the token is rejected by an API indicating stale or missing scopes.
+ */
+export async function removeCachedAuthToken(token: string): Promise<void> {
+    return new Promise((resolve) => {
+        chrome.identity.removeCachedAuthToken({ token }, () => {
+            console.debug("[Auth] Cleared cached auth token");
+            resolve();
+        });
+    });
+}
