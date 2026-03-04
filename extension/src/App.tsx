@@ -104,7 +104,13 @@ function App() {
         }
       } else if (result.status === 'requires_clarification') {
         setState('error');
-        setError('Could not understand the problem. Please provide more details.');
+        // Show specific message for images with no STEM problem detected
+        const isImageProblem = result.extracted_problem === 'No STEM problem found in the image.';
+        setError(
+          isImageProblem
+            ? 'No STEM problem was found in this image. Please upload a photo of a math, science, or engineering problem.'
+            : 'Could not understand the problem. Please provide more details.'
+        );
       } else {
         setState('error');
         setError('An unexpected error occurred.');

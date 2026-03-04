@@ -288,24 +288,36 @@ async def vision_classifier_node(state: GraphState) -> GraphState:
             else:
                 image_b64 = image_data
             
-            # SINGLE API CALL: Extract problem AND classify together
+            # SINGLE API CALL: Extract problem(s), validate STEM content, AND classify
             combined_message = HumanMessage(
                 content=[
-                    {"type": "text", "text": """Analyze this image of a STEM problem.
+                    {"type": "text", "text": """Analyze this image carefully.
 
-TASK 1: Extract the exact problem text, equations, or question shown.
-TASK 2: Classify the topic.
+TASK 1: Determine how many STEM problems (math, physics, chemistry, biology, computer science) are visible in the image.
+TASK 2: If exactly one problem, extract the problem text and classify it.
+TASK 3: If multiple problems, list each one briefly.
+
+RULES:
+- A STEM problem is a question, equation, formula, or exercise that requires solving.
+- If the image contains NO STEM problems (e.g. a selfie, meme, landscape, random text, non-STEM content), set problem_count to 0.
+- If the image contains EXACTLY ONE STEM problem, set problem_count to 1 and fill in the classification fields.
+- If the image contains MULTIPLE distinct STEM problems, set problem_count to the number found and list them in the "problems" array.
 
 Respond in this EXACT JSON format:
 {
-  "extracted_problem": "The problem text you see in the image",
+  "problem_count": 1,
+  "extracted_problem": "The problem text you see (only if problem_count == 1)",
   "subject": "Math|Physics|Chemistry|Biology|Computer Science",
-  "category": "Linear Algebra|Calculus|Mechanics|Stochastic Processes|etc",
-  "specific_topic": "Cross Product|Derivative|Ornstein-Uhlenbeck Process|etc",
-  "confidence": 1.0
+  "category": "Linear Algebra|Calculus|Mechanics|etc",
+  "specific_topic": "Cross Product|Derivative|etc",
+  "confidence": 1.0,
+  "problems": ["Problem 1 brief description", "Problem 2 brief description"]
 }
 
-Be specific with the topic. Use confidence 1.0 for clear STEM problems."""},
+IMPORTANT:
+- "problems" array should ONLY be populated when problem_count > 1
+- Use confidence 1.0 for clear STEM problems, 0.0 for non-STEM images
+- Be specific with the topic classification"""},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}}
                 ]
             )
@@ -335,6 +347,39 @@ Be specific with the topic. Use confidence 1.0 for clear STEM problems."""},
             json_str = response_text[start_idx:end_idx + 1]
             data = json.loads(json_str)
             
+            problem_count = int(data.get("problem_count", 1))
+            logger.info(f"[VisionClassifier] Detected {problem_count} STEM problem(s)")
+            
+            # === CASE 1: No STEM problems found ===
+            if problem_count == 0:
+                logger.info("[VisionClassifier] No STEM problems detected in image")
+                return {
+                    **state,
+                    "input_content": "No STEM problem found in the image.",
+                    "topic": None,
+                    "confidence_score": 0.0,
+                    "detected_ambiguity": False,
+                    "candidate_topics": []
+                }
+            
+            # === CASE 2: Multiple STEM problems found ===
+            if problem_count > 1:
+                problems_list = data.get("problems", [])
+                if not problems_list:
+                    # Fallback: if LLM didn't populate the array, create generic entries
+                    problems_list = [f"Problem {i+1}" for i in range(problem_count)]
+                
+                logger.info(f"[VisionClassifier] Multiple problems detected: {problems_list}")
+                return {
+                    **state,
+                    "input_content": "Multiple problems detected in the image.",
+                    "topic": None,
+                    "confidence_score": 0.5,  # Medium — triggers disambiguation
+                    "detected_ambiguity": True,
+                    "candidate_topics": problems_list
+                }
+            
+            # === CASE 3: Exactly one STEM problem (normal flow) ===
             extracted_text = data.get("extracted_problem", "")
             subject = data.get("subject", "Math")
             category = data.get("category", "Unknown")
