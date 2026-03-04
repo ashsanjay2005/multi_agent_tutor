@@ -358,3 +358,53 @@ export async function deleteProblem(userId: string, sessionId: string): Promise<
         console.debug('[Backboard] deleteProblem failed:', e);
     }
 }
+
+// ============================================================================
+// GOOGLE DOCS CHEAT SHEET GENERATION
+// ============================================================================
+
+interface CheatSheetProblem {
+    problem: string;
+    topic: string;
+    final_answer: string;
+}
+
+interface GenerateCheatSheetRequest {
+    user_id: string;
+    folder_name: string;
+    problems: CheatSheetProblem[];
+    google_access_token: string;
+}
+
+export interface GenerateCheatSheetResponse {
+    doc_url: string;
+    doc_title: string;
+}
+
+/**
+ * Generate a cheat sheet from folder problems and write it to Google Docs.
+ *
+ * 1. Gets a Google Docs access token via chrome.identity
+ * 2. Sends folder data + token to backend
+ * 3. Backend generates content via LLM and writes to Google Docs
+ * 4. Returns the created Google Doc URL
+ */
+export async function generateCheatSheet(
+    userId: string,
+    folderName: string,
+    problems: CheatSheetProblem[],
+    googleAccessToken: string,
+): Promise<GenerateCheatSheetResponse> {
+    const request: GenerateCheatSheetRequest = {
+        user_id: userId,
+        folder_name: folderName,
+        problems,
+        google_access_token: googleAccessToken,
+    };
+
+    return fetchAPI<GenerateCheatSheetResponse>('/v1/generate_cheatsheet', {
+        method: 'POST',
+        body: JSON.stringify(request),
+    });
+}
+

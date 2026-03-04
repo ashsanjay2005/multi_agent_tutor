@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Stepwise",
-  "version": "0.1.0",
-  "description": "AI-powered math tutor that solves problems from screenshots or text",
+  "version": "1.0.0",
+  "description": "AI-powered math tutor that solves STEM problems from screenshots or text",
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
@@ -34,7 +34,8 @@
     "scopes": [
       "openid",
       "email",
-      "profile"
+      "profile",
+      "https://www.googleapis.com/auth/documents"
     ]
   },
   "host_permissions": [

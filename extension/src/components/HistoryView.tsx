@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect } from 'react';
-import { ChevronDown, ChevronRight, Trash2, BookOpen, FolderPlus, Folder, FolderOpen, X, Plus, Check, CheckSquare, Square, Brain, Sparkles } from 'lucide-react';
+import { ChevronDown, ChevronRight, Trash2, BookOpen, FolderPlus, Folder, FolderOpen, X, Plus, Check, CheckSquare, Square, Brain, Sparkles, FileText, Loader2, ExternalLink } from 'lucide-react';
 import type { HistorySession, Folder as FolderType, FolderColor } from '../lib/storage';
-import { syncFolder, suggestFolder as suggestFolderAPI } from '../lib/api';
+import { syncFolder, suggestFolder as suggestFolderAPI, generateCheatSheet } from '../lib/api';
 import { getUserId } from '../lib/utils';
+import { getGoogleDocsAccessToken } from '../lib/auth';
 
 // Color mappings
 const FOLDER_COLORS: Record<FolderColor, { bg: string; border: string; text: string; accent: string }> = {
@@ -481,11 +482,42 @@ function FolderAccordion({
     const [isExpanded, setIsExpanded] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [isDragOver, setIsDragOver] = useState(false);
+    const [cheatSheetLoading, setCheatSheetLoading] = useState(false);
+    const [cheatSheetError, setCheatSheetError] = useState<string | null>(null);
+    const [cheatSheetUrl, setCheatSheetUrl] = useState<string | null>(null);
 
     const colorStyle = FOLDER_COLORS[folder.color] || FOLDER_COLORS.purple;
     const primaryTopic = getPrimaryTopic(items);
     const reviewedCount = items.filter(i => i.reviewed).length;
     const progress = items.length > 0 ? (reviewedCount / items.length) * 100 : 0;
+
+    const handleCreateCheatSheet = async () => {
+        if (items.length === 0) return;
+        setCheatSheetLoading(true);
+        setCheatSheetError(null);
+        setCheatSheetUrl(null);
+        try {
+            const accessToken = await getGoogleDocsAccessToken();
+            const problems = items.map(s => ({
+                problem: s.problem,
+                topic: s.topic,
+                final_answer: s.finalAnswer || '',
+            }));
+            const result = await generateCheatSheet(
+                getUserId(),
+                folder.name,
+                problems,
+                accessToken,
+            );
+            setCheatSheetUrl(result.doc_url);
+            window.open(result.doc_url, '_blank');
+        } catch (e: any) {
+            console.error('[CheatSheet] Failed:', e);
+            setCheatSheetError(e.message || 'Failed to create cheat sheet');
+        } finally {
+            setCheatSheetLoading(false);
+        }
+    };
 
     const handleDragOver = (e: React.DragEvent) => {
         e.preventDefault();
@@ -540,6 +572,21 @@ function FolderAccordion({
                     <button
                         onClick={(e) => {
                             e.stopPropagation();
+                            handleCreateCheatSheet();
+                        }}
+                        disabled={cheatSheetLoading || items.length === 0}
+                        className="p-1 rounded hover:bg-slate-700 text-purple-400 hover:text-purple-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="Create Cheat Sheet with Google Docs"
+                    >
+                        {cheatSheetLoading ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                            <FileText className="h-3.5 w-3.5" />
+                        )}
+                    </button>
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
                             if (confirm(`Delete folder "${folder.name}"? Items will be moved to General History.`)) {
                                 onDeleteFolder();
                             }
@@ -563,6 +610,29 @@ function FolderAccordion({
                     style={{ width: `${progress}%`, backgroundColor: colorStyle.accent }}
                 />
             </div>
+
+            {/* Cheat Sheet Status Messages */}
+            {cheatSheetError && (
+                <div className="mx-3 mb-2 px-3 py-2 bg-red-900/30 border border-red-500/30 rounded-lg text-xs text-red-300 flex items-center gap-2">
+                    <span>⚠️ {cheatSheetError}</span>
+                    <button onClick={() => setCheatSheetError(null)} className="ml-auto text-red-400 hover:text-red-300">
+                        <X className="h-3 w-3" />
+                    </button>
+                </div>
+            )}
+            {cheatSheetUrl && !cheatSheetError && (
+                <div className="mx-3 mb-2 px-3 py-2 bg-green-900/30 border border-green-500/30 rounded-lg text-xs text-green-300 flex items-center gap-2">
+                    <span>✅ Cheat sheet created!</span>
+                    <a
+                        href={cheatSheetUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-auto flex items-center gap-1 text-green-400 hover:text-green-300"
+                    >
+                        Open <ExternalLink className="h-3 w-3" />
+                    </a>
+                </div>
+            )}
 
             {/* Folder Contents */}
             {isExpanded && (

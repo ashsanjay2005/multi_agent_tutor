@@ -1217,6 +1217,384 @@ async def submit_feedback(request: FeedbackRequest):
     return {"status": "saved", "feedback_id": result.get("id")}
 
 
+# ============================================================================
+# GOOGLE DOCS CHEAT SHEET GENERATION
+# ============================================================================
+
+class CheatSheetProblem(BaseModel):
+    """A problem sent from the frontend for cheat sheet context."""
+    problem: str
+    topic: str
+    final_answer: str = ""
+
+
+class GenerateCheatSheetRequest(BaseModel):
+    """Request to generate a cheat sheet and write it to Google Docs."""
+    user_id: str = Field(..., description="User ID for Supabase/Backboard queries")
+    folder_name: str = Field(..., description="Folder display name")
+    problems: list[CheatSheetProblem] = Field(..., description="Problems from the folder")
+    google_access_token: str = Field(..., description="OAuth access token for Google Docs API")
+
+
+class GenerateCheatSheetResponse(BaseModel):
+    """Response with the created Google Doc URL."""
+    doc_url: str
+    doc_title: str
+
+
+def _markdown_to_docs_requests(markdown_text: str) -> list[dict]:
+    """
+    Convert Markdown text into Google Docs API batchUpdate requests.
+
+    Supports:
+    - # H1, ## H2, ### H3 headings → HEADING_1/2/3
+    - **bold text** → updateTextStyle bold
+    - - bullet items → BULLET_DISC_CIRCLE_SQUARE list
+    - Regular paragraphs → NORMAL_TEXT
+    - LaTeX $...$ wrapped in bold for visibility
+
+    Strategy: Build a list of "segments" first, then convert to insertText +
+    updateParagraphStyle + updateTextStyle requests. Google Docs insertText
+    works with a cursor index; we insert at index 1 (after the implicit
+    empty paragraph) and build forward.
+    """
+    import re
+
+    lines = markdown_text.strip().split("\n")
+
+    # Each segment: { text, heading_level (0=normal), is_bullet, bold_ranges }
+    segments = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            segments.append({"text": "\n", "heading_level": 0, "is_bullet": False, "bold_ranges": []})
+            continue
+
+        heading_level = 0
+        is_bullet = False
+
+        # Detect headings
+        heading_match = re.match(r'^(#{1,3})\s+(.*)', stripped)
+        if heading_match:
+            heading_level = len(heading_match.group(1))
+            stripped = heading_match.group(2)
+
+        # Detect bullets
+        if stripped.startswith("- ") or stripped.startswith("• "):
+            is_bullet = True
+            stripped = stripped[2:]
+
+        # Find bold ranges **text**
+        bold_ranges = []
+        clean_text = ""
+        last_end = 0
+        for m in re.finditer(r'\*\*(.*?)\*\*', stripped):
+            clean_text += stripped[last_end:m.start()]
+            bold_start = len(clean_text)
+            clean_text += m.group(1)
+            bold_end = len(clean_text)
+            bold_ranges.append((bold_start, bold_end))
+            last_end = m.end()
+        clean_text += stripped[last_end:]
+
+        # Replace LaTeX $...$ with styled markers
+        clean_text = re.sub(r'\$(.+?)\$', r'[\1]', clean_text)
+
+        segments.append({
+            "text": clean_text + "\n",
+            "heading_level": heading_level,
+            "is_bullet": is_bullet,
+            "bold_ranges": bold_ranges,
+        })
+
+    # Build requests: insert all text first, then apply styles
+    # We insert at index 1 (start of document body)
+    requests = []
+    current_index = 1
+
+    # First pass: insert all text
+    full_text = ""
+    for seg in segments:
+        full_text += seg["text"]
+
+    if not full_text.strip():
+        return []
+
+    requests.append({
+        "insertText": {
+            "location": {"index": 1},
+            "text": full_text,
+        }
+    })
+
+    # Second pass: apply paragraph styles and text formatting
+    current_index = 1
+    for seg in segments:
+        text_len = len(seg["text"])
+        if text_len == 0:
+            continue
+
+        # Apply heading style
+        if seg["heading_level"] > 0:
+            heading_map = {1: "HEADING_1", 2: "HEADING_2", 3: "HEADING_3"}
+            requests.append({
+                "updateParagraphStyle": {
+                    "range": {
+                        "startIndex": current_index,
+                        "endIndex": current_index + text_len,
+                    },
+                    "paragraphStyle": {
+                        "namedStyleType": heading_map.get(seg["heading_level"], "HEADING_3"),
+                    },
+                    "fields": "namedStyleType",
+                }
+            })
+
+        # Apply bullet list style
+        if seg["is_bullet"]:
+            requests.append({
+                "createParagraphBullets": {
+                    "range": {
+                        "startIndex": current_index,
+                        "endIndex": current_index + text_len,
+                    },
+                    "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
+                }
+            })
+
+        # Apply bold formatting
+        for bold_start, bold_end in seg["bold_ranges"]:
+            abs_start = current_index + bold_start
+            abs_end = current_index + bold_end
+            if abs_start < abs_end:
+                requests.append({
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": abs_start,
+                            "endIndex": abs_end,
+                        },
+                        "textStyle": {"bold": True},
+                        "fields": "bold",
+                    }
+                })
+
+        current_index += text_len
+
+    return requests
+
+
+@app.post("/v1/generate_cheatsheet", response_model=GenerateCheatSheetResponse)
+async def generate_cheatsheet(request: GenerateCheatSheetRequest):
+    """
+    Generate a cheat sheet from folder data and write it to Google Docs.
+
+    Flow:
+    1. Gather learning context from Backboard (student profile + memory)
+    2. Combine with problem data sent from frontend
+    3. Generate cheat sheet content via LLM (Gemini)
+    4. Parse Markdown → Google Docs batchUpdate requests
+    5. Create new Google Doc and apply formatting
+    6. Return the document URL
+    """
+    import httpx
+    import json
+    import re
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.messages import HumanMessage
+
+    logger.info(f"[CheatSheet] Generating for folder '{request.folder_name}', "
+                f"user={request.user_id}, problems={len(request.problems)}")
+
+    if not request.problems:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No problems provided")
+
+    # ------------------------------------------------------------------
+    # 1. Gather learning context from Backboard
+    # ------------------------------------------------------------------
+    backboard_context = ""
+    student_profile_text = ""
+
+    # Extract primary topic from the problems
+    topic_counts: dict[str, int] = {}
+    for p in request.problems:
+        topic_counts[p.topic] = topic_counts.get(p.topic, 0) + 1
+    primary_topic = max(topic_counts, key=topic_counts.get) if topic_counts else request.folder_name
+
+    if is_backboard_available():
+        try:
+            backboard = await get_backboard_service()
+            thread_id = await backboard.get_or_create_thread(request.user_id)
+
+            # Get student profile for strengths/weaknesses
+            profile = await backboard.get_student_profile(thread_id, primary_topic)
+            if profile.has_history:
+                student_profile_text = (
+                    f"Student strengths: {', '.join(profile.strong_concepts[:5]) or 'None identified'}\n"
+                    f"Student weaknesses: {', '.join(profile.weak_concepts[:5]) or 'None identified'}\n"
+                )
+
+            # Query Backboard memory for topic-specific context
+            memory_query = (
+                f"Summarize everything you know about the student's work on: {primary_topic}. "
+                f"Include key concepts they've practiced, mistakes they've made, "
+                f"and patterns you've noticed. Be concise."
+            )
+            try:
+                backboard_context = await backboard.send_message(
+                    thread_id=thread_id,
+                    content=memory_query,
+                    metadata={"task": "cheatsheet_generation"},
+                )
+            except Exception as e:
+                logger.warning(f"[CheatSheet] Backboard memory query failed: {e}")
+
+        except Exception as e:
+            logger.warning(f"[CheatSheet] Backboard unavailable: {e}")
+
+    # ------------------------------------------------------------------
+    # 2. Build problem summary for the LLM
+    # ------------------------------------------------------------------
+    problems_text = ""
+    for i, p in enumerate(request.problems[:20], 1):  # Cap at 20 problems
+        problems_text += f"\n{i}. **Topic**: {p.topic}\n"
+        problems_text += f"   **Problem**: {p.problem[:300]}\n"
+        if p.final_answer:
+            problems_text += f"   **Answer**: {p.final_answer[:200]}\n"
+
+    # ------------------------------------------------------------------
+    # 3. Generate cheat sheet content via LLM
+    # ------------------------------------------------------------------
+    llm = ChatGoogleGenerativeAI(
+        model=settings.text_model,
+        google_api_key=settings.google_api_key,
+        temperature=0.4,
+    )
+
+    prompt = f"""You are creating a **study cheat sheet** for a student's "{request.folder_name}" folder.
+
+STUDENT PROFILE:
+{student_profile_text or "No prior learning data available."}
+
+LEARNING CONTEXT FROM MEMORY:
+{backboard_context or "No additional context available."}
+
+PROBLEMS IN THIS FOLDER:
+{problems_text}
+
+---
+
+Create a well-organized cheat sheet in **Markdown format** with the following structure:
+
+# {request.folder_name} — Cheat Sheet
+
+## Key Concepts & Definitions
+- Define the most important concepts covered in these problems
+- Include precise mathematical definitions where relevant
+
+## Essential Formulas & Theorems
+- List all important formulas using LaTeX notation ($formula$)
+- Include when and how to apply each formula
+
+## Problem-Solving Strategies
+- Step-by-step strategies for common problem types
+- Decision trees for choosing the right approach
+
+## Common Mistakes to Avoid
+- Based on the student's weak areas and common errors
+- Include tips for avoiding these pitfalls
+
+## Quick Reference Examples
+- One worked example for each major concept
+- Keep examples concise but complete
+
+## Study Tips
+- Specific recommendations based on the student's profile
+- Priority areas for further practice
+
+RULES:
+1. Use Markdown headings (## for sections, ### for subsections)
+2. Use **bold** for key terms
+3. Use bullet points for lists
+4. Use $...$ for LaTeX math expressions
+5. Keep it concise — this is a CHEAT SHEET, not a textbook
+6. Focus on the specific topics from the problems above
+7. Make it immediately useful for exam preparation"""
+
+    try:
+        result = await llm.ainvoke([HumanMessage(content=prompt)])
+        cheatsheet_markdown = result.content
+        logger.info(f"[CheatSheet] Generated {len(cheatsheet_markdown)} chars of content")
+    except Exception as e:
+        logger.error(f"[CheatSheet] LLM generation failed: {e}", exc_info=True)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Failed to generate cheat sheet content: {str(e)[:100]}"
+        )
+
+    # ------------------------------------------------------------------
+    # 4. Create Google Doc and write content via batchUpdate
+    # ------------------------------------------------------------------
+    doc_title = f"{request.folder_name} — Cheat Sheet"
+    headers = {
+        "Authorization": f"Bearer {request.google_access_token}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Step A: Create empty document
+        try:
+            create_resp = await client.post(
+                "https://docs.googleapis.com/v1/documents",
+                headers=headers,
+                json={"title": doc_title},
+            )
+            if create_resp.status_code == 401:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "Google Docs access token expired or invalid. Please re-authorize."
+                )
+            if create_resp.status_code != 200:
+                logger.error(f"[CheatSheet] Google Docs create failed: {create_resp.text}")
+                raise HTTPException(
+                    status.HTTP_502_BAD_GATEWAY,
+                    f"Google Docs API error: {create_resp.status_code}"
+                )
+
+            doc_data = create_resp.json()
+            doc_id = doc_data["documentId"]
+            doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+            logger.info(f"[CheatSheet] Created document: {doc_id}")
+        except httpx.HTTPError as e:
+            logger.error(f"[CheatSheet] Google Docs create request failed: {e}")
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "Failed to connect to Google Docs API"
+            )
+
+        # Step B: Convert Markdown to batchUpdate requests
+        batch_requests = _markdown_to_docs_requests(cheatsheet_markdown)
+
+        if batch_requests:
+            try:
+                update_resp = await client.post(
+                    f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+                    headers=headers,
+                    json={"requests": batch_requests},
+                )
+                if update_resp.status_code != 200:
+                    logger.error(f"[CheatSheet] batchUpdate failed: {update_resp.text}")
+                    # Doc was created but formatting failed — still return URL
+                    logger.warning("[CheatSheet] Returning doc URL despite formatting error")
+                else:
+                    logger.info(f"[CheatSheet] Applied {len(batch_requests)} formatting requests")
+            except httpx.HTTPError as e:
+                logger.warning(f"[CheatSheet] batchUpdate request failed: {e}")
+                # Doc was created, formatting just didn't apply
+
+    logger.info(f"[CheatSheet] Done! Doc URL: {doc_url}")
+    return GenerateCheatSheetResponse(doc_url=doc_url, doc_title=doc_title)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=settings.backend_port, reload=True)

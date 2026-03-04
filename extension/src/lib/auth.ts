@@ -315,3 +315,30 @@ export function onAuthChange(cb: AuthListener): () => void {
     listeners.add(cb);
     return () => listeners.delete(cb);
 }
+
+// -------------------------------------------------------------------
+// Google Docs Access Token (for Docs API calls)
+// -------------------------------------------------------------------
+
+/**
+ * Get a Google OAuth access token with Google Docs scope.
+ *
+ * Uses chrome.identity.getAuthToken (simpler than launchWebAuthFlow)
+ * which reads scopes from manifest.json oauth2 config.
+ *
+ * This is DIFFERENT from the ID token flow used for Supabase auth.
+ * The access token is passed to the backend for Google Docs REST API calls.
+ */
+export async function getGoogleDocsAccessToken(): Promise<string> {
+    return new Promise((resolve, reject) => {
+        chrome.identity.getAuthToken({ interactive: true }, (token) => {
+            if (chrome.runtime.lastError || !token) {
+                reject(new Error(
+                    chrome.runtime.lastError?.message ?? "Failed to get Google Docs access token"
+                ));
+                return;
+            }
+            resolve(token);
+        });
+    });
+}
