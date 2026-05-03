@@ -31,7 +31,6 @@ from rate_limiter import (
 )
 from cache import init_video_cache, get_video_cache
 from youtube_resources_graph import get_youtube_graph, YouTubeResourcesState
-from backboard_client import get_backboard_service, is_backboard_available
 from auth_context import (
     AuthContext,
     create_anonymous_token,
@@ -101,6 +100,7 @@ class AnalyzeResponse(BaseModel):
     confidence_score: Optional[float] = None
     solution_steps: Optional[list[dict]] = None  # Step-by-step solution
     final_answer: Optional[str] = None  # Final answer from solver
+    final_graph_url: Optional[str] = None  # Final complete graph for graphing problems
     extracted_problem: Optional[str] = None  # Problem text (extracted from image or original text)
 
 class HealthResponse(BaseModel):
@@ -169,79 +169,6 @@ class ResourcesResponse(BaseModel):
     has_more: bool
     total_fetched: int
 
-
-# Student Profiling models (Backboard diagnostic logging)
-class LogBreakdownRequest(BaseModel):
-    """Request to log when a student clicks 'breakdown' on a step."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    step_title: str = Field(..., description="Title of the step being broken down")
-    concept: str = Field(..., description="Normalized concept tag (e.g., 'negative_signs', 'matrix_multiplication')")
-    context: str = Field(..., description="Problem statement or step explanation")
-
-
-class LogQuizResultRequest(BaseModel):
-    """Request to log a quiz/practice result."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    concept: str = Field(..., description="Concept being tested (e.g., 'cross_product')")
-    correct: bool = Field(..., description="Whether the answer was correct")
-    question_summary: str = Field(..., description="Brief summary of the question")
-
-
-class SyncFolderRequest(BaseModel):
-    """Request to sync folder definition to Backboard memory."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    folder_id: str = Field(..., description="Unique folder identifier")
-    folder_name: str = Field(..., description="Current folder name")
-
-
-class SuggestFolderRequest(BaseModel):
-    """Request to get semantic folder suggestion for a problem."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    session_id: str = Field(..., description="Current session/problem ID")
-    topic: str = Field(..., description="Problem topic")
-    problem_text: str = Field(..., description="Problem text for semantic matching")
-
-
-class FolderSuggestionResponse(BaseModel):
-    """Semantic folder suggestion result."""
-    action: str = Field(..., description="'add_to_folder' | 'suggest_new_folder' | 'no_suggestion'")
-    folder_id: Optional[str] = Field(None, description="Suggested folder ID")
-    folder_name: Optional[str] = Field(None, description="Suggested folder name")
-    similarity_score: float = Field(0.0, description="Match confidence 0-1")
-    similar_unfiled: list[dict] = Field(default_factory=list, description="Similar unfiled problems")
-    alternate_folder: Optional[dict] = Field(None, description="Did you mean? alternative")
-
-
-class DeleteFolderRequest(BaseModel):
-    """Request to delete folder from Backboard memory."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    folder_id: str = Field(..., description="Folder ID to delete")
-
-
-class DeleteProblemRequest(BaseModel):
-    """Request to delete problem from Backboard memory."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    session_id: str = Field(..., description="Session/problem ID to delete")
-
-
-class SimilarProblemsRequest(BaseModel):
-    """Request to find semantically similar problems."""
-    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
-    topic: str = Field(..., description="Current problem topic")
-    problem_text: str = Field(..., description="Current problem text")
-
-
-class SimilarProblem(BaseModel):
-    """A similar problem found in memory."""
-    topic: str
-    similarity: float
-
-
-class SimilarProblemsResponse(BaseModel):
-    """Response with similar problems for grouping suggestions."""
-    similar_problems: list[SimilarProblem]
-    suggested_folder_name: str | None = None
-
 # ============================================================================
 # LIFECYCLE & APP
 # ============================================================================
@@ -291,16 +218,6 @@ async def lifespan(app: FastAPI):
         logger.info("Video cache initialized")
     except Exception as e:
         logger.warning(f"Video cache unavailable: {e}")
-    
-    # Initialize Backboard.io for persistent memory
-    if is_backboard_available():
-        try:
-            await get_backboard_service()
-            logger.info("Backboard.io initialized with LoCoMo memory enabled")
-        except Exception as e:
-            logger.warning(f"Backboard.io unavailable: {e}")
-    else:
-        logger.info("Backboard.io not configured (no BACKBOARD_API_KEY)")
     
     # Ensure Supabase Storage bucket exists for image offload
     try:
@@ -423,15 +340,6 @@ async def analyze_problem(
     logger.info(f"[Analyze] Request Type: {request.type}, Thread: {thread_id}")
     
     try:
-        # Get or create Backboard thread for persistent memory
-        backboard_thread_id = None
-        if auth.is_cloud and is_backboard_available():
-            try:
-                backboard = await get_backboard_service()
-                backboard_thread_id = await backboard.get_or_create_thread(user_id)
-            except Exception as e:
-                logger.warning(f"Backboard thread creation failed: {e}")
-        
         # Offload images to Supabase Storage (reduces checkpoint blob size ~80%)
         content_for_state = request.content
         if request.type == "image":
@@ -449,7 +357,6 @@ async def analyze_problem(
             "input_content": content_for_state,
             "user_id": user_id,
             "thread_id": thread_id,
-            "backboard_thread_id": backboard_thread_id,
             "topic": None,
             "confidence_score": 0.0,
             "detected_ambiguity": False,
@@ -459,6 +366,11 @@ async def analyze_problem(
             "practice_problem": None,
             "video_url": None,
             "solution_steps": None,
+            "visualization_steps": None,
+            "visualization_fallback": False,
+            "is_graphing_problem": False,
+            "step_images": None,
+            "final_graph_url": None,
             "final_response_html": None,
             "requires_user_action": False
         }
@@ -500,6 +412,7 @@ async def analyze_problem(
                     content_json={
                         "solution_steps": result.get("solution_steps"),
                         "final_answer": result.get("worked_example"),
+                        "final_graph_url": result.get("final_graph_url"),
                         "topic": result.get("topic"),
                         "confidence": result.get("confidence_score"),
                     },
@@ -517,6 +430,7 @@ async def analyze_problem(
                     solution_json={
                         "solution_steps": result.get("solution_steps"),
                         "final_answer": result.get("worked_example"),
+                        "final_graph_url": result.get("final_graph_url"),
                     },
                     source=request.type,
                 )
@@ -534,6 +448,7 @@ async def analyze_problem(
             confidence_score=result.get("confidence_score"),
             solution_steps=result.get("solution_steps"),
             final_answer=result.get("worked_example"),
+            final_graph_url=result.get("final_graph_url"),
             extracted_problem=result.get("input_content")  # Contains extracted text for images
         )
     except Exception as e:
@@ -589,6 +504,7 @@ async def resume_workflow(
             confidence_score=final_state.get("confidence_score"),
             solution_steps=final_state.get("solution_steps"),
             final_answer=final_state.get("worked_example"),
+            final_graph_url=final_state.get("final_graph_url"),
             extracted_problem=final_state.get("input_content"),
         )
     except HTTPException:
@@ -814,8 +730,8 @@ async def generate_practice(
     request: PracticeRequest,
     auth: AuthContext = Depends(require_auth_context),
 ):
-    """Generate practice problems on-demand, adapted to student's profile."""
-    user_id = require_matching_user(auth, request.user_id)
+    """Generate practice problems on-demand."""
+    require_matching_user(auth, request.user_id)
     logger.info(f"[Practice] Generating {request.num_questions} questions for: {request.topic}")
     
     from langchain_google_genai import ChatGoogleGenerativeAI
@@ -829,31 +745,10 @@ async def generate_practice(
         temperature=0.7  # Slight variation for diverse questions
     )
     
-    # Get student profile for adaptive question generation
-    profile_context = ""
-    if auth.is_cloud and is_backboard_available():
-        try:
-            from backboard_client import get_backboard_service
-            backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(user_id)
-            profile = await backboard.get_student_profile(thread_id, request.topic)
-            
-            if profile.has_history:
-                if profile.weak_concepts:
-                    profile_context += f"\nFOCUS ON WEAKNESS: Include extra questions testing: {', '.join(profile.weak_concepts[:3])}"
-                    profile_context += "\nMake these questions simpler and more foundational to build confidence."
-                if profile.strong_concepts:
-                    profile_context += f"\nSKIP BASICS ON: {', '.join(profile.strong_concepts[:3])} (student has mastered these)"
-                    profile_context += "\nMake questions on these topics more challenging."
-            logger.info(f"[Practice] Using profile: {len(profile.weak_concepts)} weaknesses, {len(profile.strong_concepts)} strengths")
-        except Exception as e:
-            logger.warning(f"[Practice] Could not get profile: {e}")
-    
     try:
         prompt = f"""Generate {request.num_questions} multiple choice practice questions on the topic: {request.topic}
 
 Original problem for context: {request.original_problem}
-{profile_context}
 
 Create questions that test the same concept but with different numbers/scenarios.
 Each question should have 4 options (A, B, C, D) with only one correct answer.
@@ -934,21 +829,8 @@ async def get_youtube_resources(
                 total_fetched=request.offset + len(cached_videos)
             )
     
-    # 2. Get student profile for Gap-Fill video queries
+    # 2. Keep the resources query focused on the current problem/topic.
     student_weakness = None
-    if auth.is_cloud and is_backboard_available():
-        try:
-            from backboard_client import get_backboard_service
-            backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(auth.user_id)
-            profile = await backboard.get_student_profile(thread_id, request.topic)
-            
-            if profile.weak_concepts:
-                # Use the most relevant weakness for Gap-Fill queries
-                student_weakness = profile.weak_concepts[0]
-                logger.info(f"[Resources] Gap-Fill targeting weakness: {student_weakness}")
-        except Exception as e:
-            logger.warning(f"[Resources] Could not get profile for Gap-Fill: {e}")
     
     # 3. Run the YouTube resources graph
     try:
@@ -999,262 +881,6 @@ async def get_youtube_resources(
             f"Failed to fetch video resources: {str(e)}"
         )
 
-
-# ============================================================================
-# STUDENT PROFILING ENDPOINTS (Backboard Diagnostic Logging)
-# ============================================================================
-
-@app.post("/v1/log_breakdown", status_code=status.HTTP_200_OK)
-async def log_breakdown(
-    request: LogBreakdownRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Log when a student clicks 'breakdown' on a step.
-    This shadow-saves the interaction to Backboard for profiling.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[LogBreakdown] user={user_id}, concept={request.concept}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return {"status": "skipped", "message": "Backboard not configured"}
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        await backboard.log_struggle(
-            thread_id=thread_id,
-            step_title=request.step_title,
-            concept=request.concept,
-            context=request.context
-        )
-        
-        return {"status": "logged", "concept": request.concept}
-        
-    except Exception as e:
-        logger.error(f"[LogBreakdown] Error: {e}", exc_info=True)
-        # Non-critical - don't fail the request
-        return {"status": "error", "message": str(e)[:100]}
-
-
-@app.post("/v1/log_quiz_result", status_code=status.HTTP_200_OK)
-async def log_quiz_result(
-    request: LogQuizResultRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Log quiz/practice results for student profiling.
-    Tracks mastery and struggle patterns.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[LogQuizResult] user={user_id}, concept={request.concept}, correct={request.correct}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return {"status": "skipped", "message": "Backboard not configured"}
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        await backboard.log_quiz_result(
-            thread_id=thread_id,
-            concept=request.concept,
-            correct=request.correct,
-            question_summary=request.question_summary
-        )
-        
-        return {"status": "logged", "concept": request.concept, "correct": request.correct}
-        
-    except Exception as e:
-        logger.error(f"[LogQuizResult] Error: {e}", exc_info=True)
-        # Non-critical - don't fail the request
-        return {"status": "error", "message": str(e)[:100]}
-
-
-@app.post("/v1/similar_problems", response_model=SimilarProblemsResponse)
-async def find_similar_problems_endpoint(
-    request: SimilarProblemsRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Find semantically similar problems from Backboard memory.
-    Used for smart grouping suggestions in history view.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[SimilarProblems] user={user_id}, topic={request.topic}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return SimilarProblemsResponse(similar_problems=[], suggested_folder_name=None)
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        similar = await backboard.find_similar_problems(
-            thread_id=thread_id,
-            query_topic=request.topic,
-            query_problem=request.problem_text
-        )
-        
-        # Convert to response model
-        similar_problems = [
-            SimilarProblem(topic=p["topic"], similarity=p["similarity"])
-            for p in similar
-        ]
-        
-        # Generate suggested folder name if we found similar problems
-        suggested_name = None
-        if similar_problems:
-            # Use most common topic category
-            base_topic = request.topic.split(" - ")[1] if " - " in request.topic else request.topic
-            suggested_name = f"{base_topic} Practice"
-        
-        return SimilarProblemsResponse(
-            similar_problems=similar_problems,
-            suggested_folder_name=suggested_name
-        )
-        
-    except Exception as e:
-        logger.error(f"[SimilarProblems] Error: {e}", exc_info=True)
-        return SimilarProblemsResponse(similar_problems=[], suggested_folder_name=None)
-
-
-# ============================================================================
-# SEMANTIC FOLDER MANAGEMENT
-# ============================================================================
-
-@app.post("/v1/sync_folder", status_code=status.HTTP_200_OK)
-async def sync_folder(
-    request: SyncFolderRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Sync folder definition to Backboard memory.
-    Called when folder is created or renamed to keep Folder Map updated.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[SyncFolder] user={user_id}, folder={request.folder_id} -> {request.folder_name}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return {"status": "skipped", "message": "Backboard not configured"}
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        await backboard.save_folder_definition(
-            thread_id=thread_id,
-            folder_id=request.folder_id,
-            folder_name=request.folder_name
-        )
-        
-        return {"status": "synced", "folder_id": request.folder_id}
-        
-    except Exception as e:
-        logger.error(f"[SyncFolder] Error: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)[:100]}
-
-
-@app.post("/v1/suggest_folder", response_model=FolderSuggestionResponse)
-async def suggest_folder(
-    request: SuggestFolderRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Get semantic folder suggestion for a problem.
-    Uses Backboard memory search with 0.85 similarity threshold.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[SuggestFolder] user={user_id}, topic={request.topic}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return FolderSuggestionResponse(action="no_suggestion")
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        suggestion = await backboard.find_folder_for_problem(
-            thread_id=thread_id,
-            problem_text=request.problem_text,
-            topic=request.topic
-        )
-        
-        return FolderSuggestionResponse(
-            action=suggestion.action,
-            folder_id=suggestion.folder_id,
-            folder_name=suggestion.folder_name,
-            similarity_score=suggestion.similarity_score,
-            similar_unfiled=suggestion.similar_unfiled,
-            alternate_folder=suggestion.alternate_folder
-        )
-        
-    except Exception as e:
-        logger.error(f"[SuggestFolder] Error: {e}", exc_info=True)
-        return FolderSuggestionResponse(action="no_suggestion")
-
-
-@app.post("/v1/delete_folder", status_code=status.HTTP_200_OK)
-async def delete_folder_memory(
-    request: DeleteFolderRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Delete folder definition from Backboard memory.
-    Called when folder is deleted to prevent stale suggestions.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[DeleteFolder] user={user_id}, folder={request.folder_id}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return {"status": "skipped", "message": "Backboard not configured"}
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        await backboard.delete_folder_definition(
-            thread_id=thread_id,
-            folder_id=request.folder_id
-        )
-        
-        return {"status": "deleted", "folder_id": request.folder_id}
-        
-    except Exception as e:
-        logger.error(f"[DeleteFolder] Error: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)[:100]}
-
-
-@app.post("/v1/delete_problem", status_code=status.HTTP_200_OK)
-async def delete_problem_memory(
-    request: DeleteProblemRequest,
-    auth: AuthContext = Depends(require_auth_context),
-):
-    """
-    Delete problem from Backboard memory.
-    Called when problem is deleted to exclude from similarity searches.
-    """
-    user_id = require_matching_user(auth, request.user_id)
-    logger.info(f"[DeleteProblem] user={user_id}, session={request.session_id}")
-    
-    if not auth.is_cloud or not is_backboard_available():
-        return {"status": "skipped", "message": "Backboard not configured"}
-    
-    try:
-        backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(user_id)
-        
-        await backboard.delete_problem_memory(
-            thread_id=thread_id,
-            session_id=request.session_id
-        )
-        
-        return {"status": "deleted", "session_id": request.session_id}
-        
-    except Exception as e:
-        logger.error(f"[DeleteProblem] Error: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)[:100]}
 
 # ============================================================================
 # SUPABASE SESSION HISTORY ENDPOINTS
@@ -1512,12 +1138,11 @@ async def generate_cheatsheet(
     Generate a cheat sheet from folder data and write it to Google Docs.
 
     Flow:
-    1. Gather learning context from Backboard (student profile + memory)
-    2. Combine with problem data sent from frontend
-    3. Generate cheat sheet content via LLM (Gemini)
-    4. Parse Markdown → Google Docs batchUpdate requests
-    5. Create new Google Doc and apply formatting
-    6. Return the document URL
+    1. Combine folder problem data sent from frontend
+    2. Generate cheat sheet content via LLM (Gemini)
+    3. Parse Markdown → Google Docs batchUpdate requests
+    4. Create new Google Doc and apply formatting
+    5. Return the document URL
     """
     import httpx
     import json
@@ -1533,50 +1158,7 @@ async def generate_cheatsheet(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No problems provided")
 
     # ------------------------------------------------------------------
-    # 1. Gather learning context from Backboard
-    # ------------------------------------------------------------------
-    backboard_context = ""
-    student_profile_text = ""
-
-    # Extract primary topic from the problems
-    topic_counts: dict[str, int] = {}
-    for p in request.problems:
-        topic_counts[p.topic] = topic_counts.get(p.topic, 0) + 1
-    primary_topic = max(topic_counts, key=topic_counts.get) if topic_counts else request.folder_name
-
-    if auth.is_cloud and is_backboard_available():
-        try:
-            backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(user_id)
-
-            # Get student profile for strengths/weaknesses
-            profile = await backboard.get_student_profile(thread_id, primary_topic)
-            if profile.has_history:
-                student_profile_text = (
-                    f"Student strengths: {', '.join(profile.strong_concepts[:5]) or 'None identified'}\n"
-                    f"Student weaknesses: {', '.join(profile.weak_concepts[:5]) or 'None identified'}\n"
-                )
-
-            # Query Backboard memory for topic-specific context
-            memory_query = (
-                f"Summarize everything you know about the student's work on: {primary_topic}. "
-                f"Include key concepts they've practiced, mistakes they've made, "
-                f"and patterns you've noticed. Be concise."
-            )
-            try:
-                backboard_context = await backboard.send_message(
-                    thread_id=thread_id,
-                    content=memory_query,
-                    metadata={"task": "cheatsheet_generation"},
-                )
-            except Exception as e:
-                logger.warning(f"[CheatSheet] Backboard memory query failed: {e}")
-
-        except Exception as e:
-            logger.warning(f"[CheatSheet] Backboard unavailable: {e}")
-
-    # ------------------------------------------------------------------
-    # 2. Build problem summary for the LLM
+    # 1. Build problem summary for the LLM
     # ------------------------------------------------------------------
     problems_text = ""
     for i, p in enumerate(request.problems[:20], 1):  # Cap at 20 problems
@@ -1595,12 +1177,6 @@ async def generate_cheatsheet(
     )
 
     prompt = f"""You are creating a **study cheat sheet** for a student's "{request.folder_name}" folder.
-
-STUDENT PROFILE:
-{student_profile_text or "No prior learning data available."}
-
-LEARNING CONTEXT FROM MEMORY:
-{backboard_context or "No additional context available."}
 
 PROBLEMS IN THIS FOLDER:
 {problems_text}
@@ -1625,7 +1201,7 @@ Create a well-organized cheat sheet in **Markdown format** with the following st
 - Decision trees for choosing the right approach
 
 ## Common Mistakes to Avoid
-- Based on the student's weak areas and common errors
+- Based on recurring patterns and common errors in the provided problems
 - Include tips for avoiding these pitfalls
 
 ## Quick Reference Examples
@@ -1633,7 +1209,7 @@ Create a well-organized cheat sheet in **Markdown format** with the following st
 - Keep examples concise but complete
 
 ## Study Tips
-- Specific recommendations based on the student's profile
+- Specific recommendations based on the folder's topics and problem types
 - Priority areas for further practice
 
 RULES:

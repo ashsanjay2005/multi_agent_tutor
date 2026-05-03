@@ -3,13 +3,12 @@
 -- Run this in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
 -- =============================================================================
 
--- 1. PROFILES: Core user settings and per-user Backboard memory link
+-- 1. PROFILES: Core user settings
 CREATE TABLE public.profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   full_name TEXT,
   avatar_url TEXT,
   grade_level TEXT,
-  backboard_assistant_id TEXT UNIQUE,
   preferences JSONB DEFAULT '{}'::JSONB,
   onboarding_completed BOOLEAN DEFAULT FALSE,
   is_active BOOLEAN DEFAULT TRUE,

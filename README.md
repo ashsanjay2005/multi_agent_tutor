@@ -1,12 +1,12 @@
 # AI STEM Tutor
 
-A Chrome extension that identifies STEM problems from text or screenshots and teaches you how to solve them step-by-step, with persistent memory across sessions.
+A Chrome extension that identifies STEM problems from text or screenshots and teaches you how to solve them step-by-step, with saved history across sessions.
 
 ## What It Does
 
 Students encounter STEM problems online but don't know which specific concept to study. Generic searches like "help with this math" don't work — you need to know it's "Cross Product" or "Gaussian Elimination" to find good tutorials.
 
-The extension classifies your problem, generates a full step-by-step solution, and remembers your learning history to personalize future explanations.
+The extension classifies your problem, generates a full step-by-step solution, and saves your solved history for review and organization.
 
 ---
 
@@ -19,9 +19,8 @@ The extension classifies your problem, generates a full step-by-step solution, a
 - **Screenshot / image support** — Paste text or upload a screenshot; images are extracted and analyzed by Gemini Vision
 - **Confidence routing** — High confidence → instant solution; low confidence → asks for clarification or disambiguation
 
-### Learning & Memory
-- **Persistent memory** — Powered by [Backboard.io](https://backboard.io) LoCoMo; remembers past problems across sessions
-- **Adaptive explanations** — Adjusts detail level based on your strengths and weaknesses per topic
+### Learning Tools
+- **Graph visualizations** — Generates local Plotly/Kaleido graph images for graphing and curve-analysis problems
 - **Practice problem generator** — Generates 3 related practice questions after each solution
 - **Parallel Execution**: Three teaching agents run concurrently:
   - Worked Example Agent
@@ -32,7 +31,7 @@ The extension classifies your problem, generates a full step-by-step solution, a
 
 ### History & Organization
 - **Session history** — All solved problems saved locally and synced to Supabase
-- **Smart folder grouping** — Semantic folder suggestions using Backboard memory
+- **Smart folder grouping** — Local topic clustering suggests folders for related unfiled problems
 - **Batch operations** — Multi-select sessions to move, mark reviewed, or delete
 
 ### Infrastructure
@@ -51,7 +50,7 @@ The extension classifies your problem, generates a full step-by-step solution, a
 - Google Gemini 2.0 Flash (vision + text)
 - Supabase (PostgreSQL + Auth + Storage)
 - Redis (rate limiting)
-- Backboard.io SDK (long-term LoCoMo memory)
+- Plotly + Kaleido (local graph rendering)
 - Docker Compose
 
 **Extension:**
@@ -70,7 +69,7 @@ backend/
   main.py                   # FastAPI app + all endpoints
   graph.py                  # LangGraph workflow (classify → route → teach)
   youtube_resources_graph.py # YouTube search sub-graph
-  backboard_client.py       # Backboard.io memory integration
+  visualization_agent.py    # Local graph visualization rendering
   supabase_client.py        # Supabase helpers (sessions, problems, storage)
   cache.py                  # PostgreSQL video cache
   rate_limiter.py           # Redis-backed rate limiting
@@ -103,7 +102,7 @@ Makefile                    # Dev shortcuts
 - Node.js 18+
 - A [Supabase](https://supabase.com) project (free tier works)
 - A [Google AI Studio](https://aistudio.google.com) API key (Gemini)
-- Optional: [YouTube Data API v3](https://console.cloud.google.com) key, [Backboard.io](https://backboard.io) API key
+- Optional: [YouTube Data API v3](https://console.cloud.google.com) key
 
 ### 1. Supabase Setup
 
@@ -132,7 +131,6 @@ GOOGLE_API_KEY=AIza...
 
 # Optional
 YOUTUBE_API_KEY=AIza...       # For YouTube video search
-BACKBOARD_API_KEY=...         # For persistent long-term memory
 REDIS_URL=redis://redis:6379  # Defaults to bundled Redis container
 
 # Confidence routing (optional)
@@ -179,12 +177,7 @@ VITE_API_URL=http://localhost:8000
 | `POST` | `/v1/explain_step` | Get a plain-English explanation of a step |
 | `POST` | `/v1/practice` | Generate practice questions for a topic |
 | `POST` | `/v1/resources` | Fetch YouTube videos for a topic |
-| `POST` | `/v1/log_breakdown` | Log when a student requests a step breakdown |
-| `POST` | `/v1/log_quiz_result` | Log a practice quiz answer |
-| `POST` | `/v1/suggest_folder` | Semantic folder suggestion for a problem |
-| `POST` | `/v1/sync_folder` | Sync folder definition to Backboard memory |
-| `POST` | `/v1/delete_folder` | Remove folder from Backboard memory |
-| `POST` | `/v1/delete_problem` | Remove problem from Backboard memory |
+| `POST` | `/v1/generate_cheatsheet` | Create a Google Docs cheat sheet from folder contents |
 
 Full interactive docs: `http://localhost:8000/docs`
 

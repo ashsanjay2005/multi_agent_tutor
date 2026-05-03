@@ -30,6 +30,7 @@ export interface AnalyzeResponse {
     solution_steps?: SolutionStep[];
     final_answer?: string;
     extracted_problem?: string;
+    final_graph_url?: string;
 }
 
 export interface ResumeRequest {
@@ -81,6 +82,10 @@ export interface SolutionStep {
     title: string;
     explanation: string;
     math_expression?: string;
+    needs_visual?: boolean;
+    visual_elements?: string[];
+    image_url?: string;
+    image_alt?: string;
     // Extension for recursive sub-steps
     id?: string;           // Stable unique ID
     label?: string;        // Display label (e.g., "1.2.1")

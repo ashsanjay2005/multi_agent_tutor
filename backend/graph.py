@@ -23,7 +23,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from state import GraphState
 from config import settings
-from backboard_client import get_backboard_service, is_backboard_available
+from visualization_agent import generate_visualization, generate_step_visualizations, should_visualize
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,11 @@ class SolutionStep(BaseModel):
     title: str = Field(description="Short title like 'Identify the vectors' or 'Apply the formula'")
     explanation: str = Field(description="Clear explanation of what we're doing in this step")
     math_expression: str = Field(default="", description="LaTeX math expression if applicable, empty string if not")
+    needs_visual: bool = Field(default=False, description="True if this step adds visible graph elements")
+    visual_elements: list[str] = Field(
+        default_factory=list,
+        description="Graph elements added by this step, e.g. vertical_asymptote_x=1 or x_intercept_(2,0)",
+    )
 
 
 class WorkedSolution(BaseModel):
@@ -89,6 +94,7 @@ class WorkedSolution(BaseModel):
     steps: list[SolutionStep] = Field(description="3-6 solution steps")
     final_answer: str = Field(description="The final answer with units if applicable")
     key_concepts: list[str] = Field(description="2-4 key concepts used in this solution")
+    is_graphing_problem: bool = Field(default=False, description="True when the answer should include a graph or sketch")
 
 
 # ============================================================================
@@ -99,48 +105,9 @@ async def text_classifier_node(state: GraphState) -> GraphState:
     """Classifies the STEM topic from text input using a lightweight LLM with structured output."""
     logger.info(f"[TextClassifier] Processing text: {state['input_content'][:50]}...")
     
-    # Try Backboard first for memory-aware classification
-    backboard_thread_id = state.get("backboard_thread_id")
     result = None
-    
-    if is_backboard_available() and backboard_thread_id:
-        try:
-            backboard = await get_backboard_service()
-            
-            system_prompt = """You are a STEM classifier that identifies EXACT operations and concepts.
-            Return ONLY valid JSON matching this schema:
-            {
-                "subject": "Math/Physics/Chemistry...",
-                "category": "Broad category",
-                "specific_topic": "EXACT operation",
-                "confidence": 0.0-1.0,
-                "ambiguous": boolean,
-                "alternatives": ["alt1", "alt2"]
-            }
-            
-            CRITICAL: 
-            - Use 1.0 confidence for clear math problems.
-            - "x" between vectors = Cross Product
-            - "dot" = Dot Product
-            - "solve system" = Gaussian Elimination
-            """
-            
-            response_text = await backboard.send_message(
-                thread_id=backboard_thread_id,
-                content=f"Classify this problem: {state['input_content']}",
-                metadata={"task": "classification"},
-                send_to_llm=True
-            )
-            
-            json_data = parse_json_output(response_text)
-            if json_data:
-                result = ClassificationResult(**json_data)
-                logger.debug(f"[TextClassifier] Backboard result: {result}")
-                
-        except Exception as e:
-            logger.warning(f"[TextClassifier] Backboard failed: {e}, falling back to standard LLM")
-    
-    # Fallback to LangChain if Backboard didn't produce a result
+
+    # Classify directly with the configured LLM.
     if not result:
         # --- Option 1: Google Gemini (Free Tier) ---
         llm = ChatGoogleGenerativeAI(
@@ -210,9 +177,9 @@ async def text_classifier_node(state: GraphState) -> GraphState:
         try:
             result = await chain.ainvoke({"problem": state["input_content"]})
         except Exception as e:
-            logger.error(f"[TextClassifier] LangChain fallback failed: {e}")
+            logger.error(f"[TextClassifier] LangChain classification failed: {e}")
 
-    # Process result (from Backboard or LangChain)
+    # Process result
     if result:
         try:
             logger.debug(f"[TextClassifier] Raw result: subject={result.subject}, category={result.category}, specific_topic={result.specific_topic}, confidence={result.confidence}")
@@ -553,83 +520,9 @@ async def step_solver_node(state: GraphState) -> GraphState:
     """Generates a step-by-step worked solution for the problem."""
     logger.info(f"[StepSolver] Solving: {state['input_content'][:50]}...")
     
-    # Try Backboard first for memory-aware solution
-    backboard_thread_id = state.get("backboard_thread_id")
     result = None
-    student_profile_context = ""
-    
-    if is_backboard_available() and backboard_thread_id:
-        try:
-            backboard = await get_backboard_service()
-            
-            # PRE-FLIGHT MEMORY CHECK: Get student's topic-specific profile
-            topic = state.get('topic', 'Unknown')
-            profile = await backboard.get_student_profile(backboard_thread_id, topic)
-            
-            # Build adaptive context based on profile
-            if profile.has_history:
-                student_profile_context = f"""
-STUDENT PROFILE FOR {topic}:
-{profile.summary}
 
-ADAPT YOUR RESPONSE:
-"""
-                if profile.weak_concepts:
-                    student_profile_context += f"- WEAKNESS AREAS (add extra detail, prerequisite refreshers): {', '.join(profile.weak_concepts[:3])}\n"
-                if profile.strong_concepts:
-                    student_profile_context += f"- STRENGTH AREAS (be concise, skip basics): {', '.join(profile.strong_concepts[:3])}\n"
-            else:
-                student_profile_context = "\nNo prior history on this topic - provide balanced explanations.\n"
-            
-            # PROACTIVE TUTORING PROMPT with student profile
-            proactive_prompt = f"""Solve this problem step-by-step: {state['input_content']}
-Topic: {topic}
-{student_profile_context}
-INSTRUCTIONS:
-1. If WEAKNESS shown: Provide EXTRA DETAIL, add 💡 Note callouts for common pitfalls, include prerequisite refreshers
-2. If STRENGTH shown: Be concise, skip basic explanations, challenge the student
-3. Use **bold** to highlight critical steps
-
-CRITICAL FORMATTING RULES:
-- Write explanations in PLAIN TEXT (English sentences with proper spacing)
-- ONLY use LaTeX ($...$) for actual mathematical equations and expressions
-- DO NOT wrap regular text like "The eigenvalues are" in LaTeX
-- Good: "The eigenvalues are $\\lambda_1 = 5$ and $\\lambda_2 = 2$"
-- Bad: "$Theeigenvaluesare\\lambda_1 = 5and\\lambda_2 = 2$"
-
-Return ONLY valid JSON matching this schema:
-{{
-    "problem_restatement": "One sentence summary in plain text",
-    "steps": [
-        {{
-            "step_number": 1,
-            "title": "Short title (plain text, no LaTeX)",
-            "explanation": "Plain text explanation with inline $math$ only for equations",
-            "math_expression": "LaTeX expression for the key equation of this step"
-        }}
-    ],
-    "final_answer": "Final answer (plain text with $math$ for the result)",
-    "key_concepts": ["concept1", "concept2"]
-}}
-
-Create 3-6 clear steps. Keep text readable - only equations in LaTeX."""
-            
-            response_text = await backboard.send_message(
-                thread_id=backboard_thread_id,
-                content=proactive_prompt,
-                metadata={"task": "solving", "topic": state.get("topic")},
-                send_to_llm=True
-            )
-            
-            json_data = parse_json_output(response_text)
-            if json_data:
-                result = WorkedSolution(**json_data)
-                logger.info(f"[StepSolver] Backboard generated {len(result.steps)} steps (profile-aware)")
-                
-        except Exception as e:
-            logger.warning(f"[StepSolver] Backboard failed: {e}, falling back to standard LLM")
-
-    # Fallback to LangChain
+    # Solve directly with the configured LLM.
     if not result:
         llm = ChatGoogleGenerativeAI(
             model=settings.text_model,
@@ -647,13 +540,36 @@ Create 3-6 clear steps. Keep text readable - only equations in LaTeX."""
     1. Have a clear, short title (plain text, no LaTeX)
     2. Explain what we're doing and why (plain text sentences)
     3. Include math expressions in LaTeX format ONLY for actual equations
+    4. For graphing/plotting/sketching problems, mark steps that add visible graph elements
     
     CRITICAL: Keep explanations readable!
     - DO NOT wrap regular text in LaTeX
     - Good: "To find the eigenvalues, we solve $det(A - \\lambda I) = 0$"
     - Bad: "$Tofindtheeigenvalueswesolvedet(A-\\lambda I)=0$"
     
+    GRAPHING OUTPUT:
+    Set is_graphing_problem=true if the problem asks to graph, plot, sketch, or analyze a curve visually.
+    For graphing problems, each step should include:
+    - needs_visual: true when this step adds something visible to the graph
+    - visual_elements: the new graph elements added in that step
+
+    Visual element vocabulary:
+    - vertical_asymptote_x=<value>
+    - horizontal_asymptote_y=<value>
+    - oblique_asymptote_<expression>
+    - x_intercept_(<x>,0)
+    - y_intercept_(0,<y>)
+    - point_(<x>,<y>)
+    - positive_region_(<start>,<end>)
+    - negative_region_(<start>,<end>)
+    - function_curve
+
+    Example: for graphing f(x) = (x-2)^2(x+1)/(x-1), include visual elements like
+    vertical_asymptote_x=1, x_intercept_(-1,0), x_intercept_(2,0), y_intercept_(0,-4),
+    oblique_asymptote_x^2-2*x-2, and function_curve in the relevant steps.
+
     Topic-specific guidance:
+    - Graphing Functions: Include domain, intercepts, asymptotes, sign analysis, then final sketch
     - Cross Product: Use the determinant method with i, j, k unit vectors
     - Dot Product: Multiply corresponding components and sum
     - Matrix Multiplication: Show row × column operations
@@ -684,39 +600,28 @@ Create 3-6 clear steps. Keep text readable - only equations in LaTeX."""
                 "step_number": s.step_number,
                 "title": s.title,
                 "explanation": s.explanation,
-                "math_expression": s.math_expression
+                "math_expression": s.math_expression,
+                "needs_visual": s.needs_visual,
+                "visual_elements": s.visual_elements,
             }
             for s in result.steps
         ]
         
         logger.info(f"[StepSolver] Generated {len(steps_dict)} steps")
-        
-        # EXPLICIT MEMORY SAVE: Save completed problem to Backboard memory
-        # (memory="Auto" in send_message doesn't trigger writes reliably)
-        if is_backboard_available() and backboard_thread_id:
-            try:
-                backboard = await get_backboard_service()
-                await backboard.shadow_save(
-                    thread_id=backboard_thread_id,
-                    problem_text=state["input_content"][:500],  # Truncate for memory
-                    topic=state.get("topic", "Unknown"),
-                    solution_summary=result.final_answer
-                )
-                logger.info(f"[StepSolver] Saved to Backboard memory: {state.get('topic')}")
-            except Exception as e:
-                logger.warning(f"[StepSolver] Memory save failed (non-critical): {e}")
-        
+
         return {
             **state,
             "solution_steps": steps_dict,
-            "worked_example": result.final_answer
+            "worked_example": result.final_answer,
+            "is_graphing_problem": result.is_graphing_problem,
         }
 
     # Final Failure Case
     return {
         **state,
-        "solution_steps": [{"step_number": 1, "title": "Error", "explanation": "Failed to generate solution", "math_expression": ""}],
-        "worked_example": "Solution generation failed"
+        "solution_steps": [{"step_number": 1, "title": "Error", "explanation": "Failed to generate solution", "math_expression": "", "needs_visual": False, "visual_elements": []}],
+        "worked_example": "Solution generation failed",
+        "is_graphing_problem": False,
     }
 
 
@@ -746,15 +651,51 @@ async def parallel_teaching_nodes(state: GraphState) -> GraphState:
 
 
 async def assembler_node(state: GraphState) -> GraphState:
-    """Compiles final response."""
+    """Compiles final response and attaches generated visualizations."""
     logger.info("[Assembler] Compiling final response...")
+    solution_steps = state.get("solution_steps", []) or []
+    final_graph_url = None
+
+    if state.get("is_graphing_problem") and solution_steps:
+        try:
+            step_images = await generate_step_visualizations(
+                problem=state.get("input_content", ""),
+                topic=state.get("topic", ""),
+                solution_steps=solution_steps,
+            )
+            final_graph_url = step_images.pop("final", None)
+            for step in solution_steps:
+                step_num = step.get("step_number")
+                if step_num in step_images:
+                    step["image_url"] = step_images[step_num]
+                    step["image_alt"] = f"Graph for step {step_num}: {step.get('title', '')}"
+            logger.info(
+                f"[Assembler] Attached {sum(1 for s in solution_steps if s.get('image_url'))} graph images"
+            )
+        except Exception as e:
+            logger.warning(f"[Assembler] Progressive visualization failed: {e}")
+    elif solution_steps and should_visualize(state.get("input_content", ""), state.get("topic", "")):
+        try:
+            result = await generate_visualization(
+                problem=state.get("input_content", ""),
+                topic=state.get("topic", ""),
+                solution_steps=solution_steps,
+            )
+            for viz in result.steps:
+                if viz.has_visual and viz.image_url:
+                    solution_steps[0]["image_url"] = viz.image_url
+                    solution_steps[0]["image_alt"] = viz.alt_text or "Mathematical visualization"
+                    final_graph_url = viz.image_url
+                    break
+        except Exception as e:
+            logger.warning(f"[Assembler] Single visualization failed: {e}")
+
     final_html = f"<html><body><h1>{state['topic']}</h1></body></html>"
-    
-    # Note: Memory is already saved by step_solver_node via send_message with memory="Auto"
-    # No need to call shadow_save here - that would create duplicate memories
-    
+
     return {
         **state,
+        "solution_steps": solution_steps,
+        "final_graph_url": final_graph_url,
         "final_response_html": final_html,
         "requires_user_action": False
     }
@@ -895,4 +836,3 @@ async def get_graph():
                 await asyncio.sleep(wait_time)
     
     raise RuntimeError(f"Failed to connect to database after {max_retries} attempts: {last_error}")
-

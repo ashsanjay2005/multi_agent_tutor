@@ -5,8 +5,7 @@ import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, Rotate
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import DOMPurify from 'dompurify';
-import { expandStep, logBreakdown } from '../lib/api';
-import { getUserId } from '../lib/utils';
+import { expandStep } from '../lib/api';
 import type { SolutionStep, SubStep, StopReason } from '../lib/types';
 
 interface SolutionViewProps {
@@ -362,14 +361,6 @@ export function SolutionView({
         current_depth: depth,
       });
 
-      // Log breakdown to Backboard for adaptive profiling (fire-and-forget)
-      logBreakdown({
-        user_id: getUserId(),
-        step_title: step.title,
-        concept: topic?.split(' - ').pop()?.replace(/\s+/g, '_').toLowerCase() || 'unknown',
-        context: `${originalProblem || ''} | ${step.explanation}`
-      });
-
       if (result.stop_reason) {
         setStopReasons(prev => ({
           ...prev,
@@ -449,6 +440,17 @@ export function SolutionView({
                       {/* Display Math Expression */}
                       {step.math_expression && (
                         <MathDisplay latex={step.math_expression} />
+                      )}
+
+                      {step.image_url && (
+                        <div className="mt-4 mb-2">
+                          <img
+                            src={step.image_url}
+                            alt={step.image_alt || 'Mathematical visualization'}
+                            loading="lazy"
+                            className="max-w-full rounded-lg border border-slate-700/50 bg-slate-950"
+                          />
+                        </div>
                       )}
 
                       {/* Sub-steps (if expanded) with fading hierarchy */}

@@ -57,11 +57,6 @@ class Settings(BaseSettings):
     vision_model: str = "gemini-2.0-flash"
     text_model: str = "gemini-2.0-flash"
     
-    # Backboard.io Configuration
-    backboard_api_key: str = ""
-    # backboard_assistant_id is now PER-USER, stored in profiles table
-    backboard_assistant_name: str = "STEM Math Tutor"
-    
     # Logging
     log_level: str = "INFO"
 

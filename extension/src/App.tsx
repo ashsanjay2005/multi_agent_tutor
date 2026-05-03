@@ -12,7 +12,7 @@ import { HistoryView } from './components/HistoryView';
 import { YouTubeVideosView } from './components/YouTubeVideosView';
 import { Upload, X, Sparkles, Pin, LogIn, LogOut, Cloud, HardDrive } from 'lucide-react';
 import { initAuth, onAuthChange, signInInteractive, signOut as authSignOut, type AuthState } from './lib/auth';
-import { analyzeProblem, resumeWorkflow, generatePractice, getYouTubeResources, APIError, RateLimitError, deleteProblem as deleteProblemMemory, deleteFolder as deleteFolderMemory } from './lib/api';
+import { analyzeProblem, resumeWorkflow, generatePractice, getYouTubeResources, APIError, RateLimitError } from './lib/api';
 import { getUserId } from './lib/utils';
 import { saveSession, getHistory, deleteSession, clearHistory, updateSession, getFolders, createFolder, deleteFolder as deleteFolderStorage, moveToFolder, batchMoveToFolder, batchMarkReviewed, batchDeleteSessions, type HistorySession, type Folder } from './lib/storage';
 import type { AnalyzeResponse, InputType, PracticeQuestion, SolutionStep, SubStep, VideoResource } from './lib/types';
@@ -351,8 +351,6 @@ function App() {
   const handleDeleteSession = async (sessionId: string) => {
     await deleteSession(sessionId);
     setHistorySessions(await getHistory());
-    // Sync deletion to Backboard memory (fire-and-forget)
-    deleteProblemMemory(getUserId(), sessionId);
   };
 
   // YouTube Videos Handlers
@@ -572,8 +570,6 @@ function App() {
             setFolders(prev => prev.filter(f => f.id !== folderId));
             const updated = await getHistory();
             setHistorySessions(updated);
-            // Sync deletion to Backboard memory (fire-and-forget)
-            deleteFolderMemory(getUserId(), folderId);
           }}
           onMoveToFolder={async (sessionId, folderId) => {
             await moveToFolder(sessionId, folderId);
@@ -900,4 +896,3 @@ Example: Solve for x: 2x + 5 = 13"
 }
 
 export default App;
-

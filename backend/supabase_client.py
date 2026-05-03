@@ -77,35 +77,6 @@ async def upsert_profile(user_id: str, **fields) -> dict:
     return result.data[0] if result.data else data
 
 
-async def set_backboard_assistant_id(user_id: str, assistant_id: str) -> None:
-    """
-    Save a Backboard assistant ID to the user's profile.
-    Called after the compensating-transaction pattern:
-      1. Create assistant in Backboard
-      2. Write ID here
-      If step 2 fails, caller must delete the assistant (rollback).
-    """
-    if not _is_valid_uuid(user_id):
-        logger.debug(f"Skipping set_backboard_assistant_id for non-UUID user: {user_id}")
-        return
-    
-    # Ensure user_id is a string (pydantic models might pass UUID objects)
-    user_id_str = str(user_id)
-    
-    client = get_supabase()
-    client.table("profiles").update(
-        {"backboard_assistant_id": assistant_id}
-    ).eq("id", user_id_str).execute()
-
-
-async def get_backboard_assistant_id(user_id: str) -> Optional[str]:
-    """Get the per-user Backboard assistant ID from their profile."""
-    profile = await get_profile(user_id)
-    if profile:
-        return profile.get("backboard_assistant_id")
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Session helpers
 # ---------------------------------------------------------------------------

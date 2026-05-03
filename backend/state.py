@@ -21,7 +21,6 @@ class GraphState(TypedDict):
     input_content: str  # Text string or Base64 image
     user_id: str
     thread_id: str
-    backboard_thread_id: Optional[str]  # Backboard.io conversation thread for memory
     
     # --- Classification ---
     topic: Optional[str]
@@ -34,10 +33,14 @@ class GraphState(TypedDict):
     worked_example: Optional[str]  # Markdown/LaTeX
     practice_problem: Optional[str]
     video_url: Optional[str]
-    solution_steps: Optional[List[dict]]  # [{step_number, title, explanation, math_expression}]
+    solution_steps: Optional[List[dict]]  # [{step_number, title, explanation, math_expression, image_url?}]
+    visualization_steps: Optional[List[dict]]
+    visualization_fallback: bool
+    is_graphing_problem: bool
+    step_images: Optional[dict]
+    final_graph_url: Optional[str]
     
     # --- Output ---
     final_response_html: Optional[str]
     requires_user_action: bool  # True if we are waiting for topic selection
-
 

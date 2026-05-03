@@ -22,7 +22,7 @@ backend/
 ├── state.py                 # GraphState TypedDict
 ├── config.py                # Pydantic settings (env vars)
 ├── supabase_client.py       # Supabase database helpers
-├── backboard_client.py      # Backboard.io memory integration
+├── visualization_agent.py   # Local graph visualization rendering
 ├── cache.py                 # Video cache (Supabase-backed)
 ├── rate_limiter.py          # Redis rate limiting
 ├── youtube_resources_graph.py # YouTube video search sub-graph
@@ -55,5 +55,4 @@ All config is via environment variables (see `.env.example`). Key settings:
 | `SUPABASE_SERVICE_KEY` | ✅ | Supabase service role key |
 | `GOOGLE_API_KEY` | ✅ | Google AI Studio API key |
 | `YOUTUBE_API_KEY` | Optional | YouTube Data API v3 key |
-| `BACKBOARD_API_KEY` | Optional | Backboard.io key for long-term memory |
 | `REDIS_URL` | Optional | Defaults to bundled Redis container |
