@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { ChevronDown, CheckCircle2, Copy, GraduationCap, Loader2, Layers, RotateCcw, Play, History } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import DOMPurify from 'dompurify';
 import { expandStep, logBreakdown } from '../lib/api';
 import { getUserId } from '../lib/utils';
 import type { SolutionStep, SubStep, StopReason } from '../lib/types';
@@ -98,6 +99,22 @@ const LATEX_COMMANDS = [
   'color', 'boxed', 'cancel',
 ];
 
+function sanitizeHtml(html: string): string {
+  return DOMPurify.sanitize(html, {
+    USE_PROFILES: { html: true },
+    ADD_ATTR: ['class', 'style'],
+  });
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Preprocess LaTeX to repair stripped backslashes
 function preprocessLaTeX(text: string): string {
   if (!text) return '';
@@ -136,11 +153,11 @@ function renderLatexInText(text: string): string {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
         displayMode: true,
-        trust: true,
+        trust: false,
       });
       return `<div style="margin: 16px 0; text-align: left;">${rendered}</div>`;
     } catch (e) {
-      return `<code>${latex}</code>`;
+      return `<code>${escapeHtml(latex)}</code>`;
     }
   });
 
@@ -150,11 +167,11 @@ function renderLatexInText(text: string): string {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
         displayMode: true,
-        trust: true,
+        trust: false,
       });
       return `<div style="margin: 16px 0; text-align: left;">${rendered}</div>`;
     } catch (e) {
-      return `<code>${latex}</code>`;
+      return `<code>${escapeHtml(latex)}</code>`;
     }
   });
 
@@ -164,11 +181,11 @@ function renderLatexInText(text: string): string {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
         displayMode: false,
-        trust: true,
+        trust: false,
       });
       return `<span style="margin: 0 2px;">${rendered}</span>`;
     } catch (e) {
-      return `<code>${latex}</code>`;
+      return `<code>${escapeHtml(latex)}</code>`;
     }
   });
 
@@ -178,11 +195,11 @@ function renderLatexInText(text: string): string {
       const rendered = katex.renderToString(latex.trim(), {
         throwOnError: false,
         displayMode: false,
-        trust: true,
+        trust: false,
       });
       return `<span style="margin: 0 2px;">${rendered}</span>`;
     } catch (e) {
-      return `<code>${latex}</code>`;
+      return `<code>${escapeHtml(latex)}</code>`;
     }
   });
 
@@ -192,12 +209,12 @@ function renderLatexInText(text: string): string {
       const rendered = katex.renderToString(result.trim(), {
         throwOnError: false,
         displayMode: false,
-        trust: true,
+        trust: false,
       });
       return `<span style="margin: 0 2px;">${rendered}</span>`;
     } catch (e) {
       // If KaTeX fails, return original text
-      return result;
+      return escapeHtml(result);
     }
   }
 
@@ -206,7 +223,7 @@ function renderLatexInText(text: string): string {
 
 // Component to render text with inline LaTeX
 function TextWithMath({ text }: { text: string }) {
-  const renderedHtml = useMemo(() => renderLatexInText(text), [text]);
+  const renderedHtml = useMemo(() => sanitizeHtml(renderLatexInText(text)), [text]);
 
   return (
     <span
@@ -244,9 +261,9 @@ function MathDisplay({ latex, depth = 0 }: { latex: string; depth?: number }) {
       const rendered = katex.renderToString(cleanLatex, {
         throwOnError: false,
         displayMode: true,
-        trust: true,
+        trust: false,
       });
-      setHtml(rendered);
+      setHtml(sanitizeHtml(rendered));
     } catch (e) {
       console.error('KaTeX error:', e, 'Original:', latex);
       // Fallback: try to render as-is with error tolerance
@@ -254,11 +271,11 @@ function MathDisplay({ latex, depth = 0 }: { latex: string; depth?: number }) {
         const fallback = katex.renderToString(latex.replace(/\$/g, ''), {
           throwOnError: false,
           displayMode: true,
-          trust: true,
+          trust: false,
         });
-        setHtml(fallback);
+        setHtml(sanitizeHtml(fallback));
       } catch {
-        setHtml(`<pre style="text-align: left; font-size: 12px; overflow-x: auto;">${latex}</pre>`);
+        setHtml(sanitizeHtml(`<pre style="text-align: left; font-size: 12px; overflow-x: auto;">${escapeHtml(latex)}</pre>`));
       }
     }
   }, [latex]);
@@ -689,7 +706,7 @@ export function SolutionView({
           <CardContent className="pt-6">
             <div
               className="prose prose-invert prose-sm max-w-none"
-              dangerouslySetInnerHTML={{ __html: html }}
+              dangerouslySetInnerHTML={{ __html: sanitizeHtml(html) }}
             />
           </CardContent>
         </Card>
@@ -711,4 +728,3 @@ export function SolutionView({
     </div>
   );
 }
-

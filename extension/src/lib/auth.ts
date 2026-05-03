@@ -20,6 +20,7 @@ export type AuthMode = "initializing" | "cloud" | "local_anon";
 export interface AuthState {
     mode: AuthMode;
     userId: string;       // Always a valid UUID
+    accessToken?: string;
     email?: string;
     displayName?: string;
 }
@@ -31,6 +32,7 @@ type AuthListener = (state: AuthState) => void;
 // -------------------------------------------------------------------
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "https://inbbdadosiwugdlnqttq.supabase.co";
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: {
@@ -44,6 +46,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 // -------------------------------------------------------------------
 const SESSION_KEY = "stepwise_supabase_session";
 const LOCAL_ANON_ID_KEY = "stepwise_local_anon_id";
+const ANON_SESSION_KEY = "stepwise_backend_anon_session";
 
 // -------------------------------------------------------------------
 // Internal state
@@ -102,6 +105,49 @@ async function getOrCreateLocalAnonId(): Promise<string> {
     const id = generateUUIDv4();
     await chrome.storage.local.set({ [LOCAL_ANON_ID_KEY]: id });
     return id;
+}
+
+interface BackendAnonymousSession {
+    user_id: string;
+    access_token: string;
+    expires_at: number;
+}
+
+async function loadBackendAnonymousSession(): Promise<BackendAnonymousSession | null> {
+    const result = await chrome.storage.local.get(ANON_SESSION_KEY);
+    return result[ANON_SESSION_KEY] ?? null;
+}
+
+async function persistBackendAnonymousSession(session: BackendAnonymousSession): Promise<void> {
+    await chrome.storage.local.set({ [ANON_SESSION_KEY]: session });
+    await chrome.storage.local.set({ [LOCAL_ANON_ID_KEY]: session.user_id });
+}
+
+async function createBackendAnonymousSession(): Promise<BackendAnonymousSession> {
+    const response = await fetch(`${API_BASE_URL}/v1/anonymous_session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+    });
+    if (!response.ok) {
+        throw new Error(`Anonymous session failed: HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    return {
+        user_id: data.user_id,
+        access_token: data.access_token,
+        expires_at: data.expires_at,
+    };
+}
+
+async function getOrCreateBackendAnonymousSession(): Promise<BackendAnonymousSession> {
+    const existing = await loadBackendAnonymousSession();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (existing?.access_token && existing.expires_at > nowSeconds + 60) {
+        return existing;
+    }
+    const created = await createBackendAnonymousSession();
+    await persistBackendAnonymousSession(created);
+    return created;
 }
 
 // -------------------------------------------------------------------
@@ -197,6 +243,7 @@ export async function initAuth(): Promise<AuthState> {
             const next: AuthState = {
                 mode: "cloud",
                 userId: existing.user.id,
+                accessToken: existing.access_token,
                 email: existing.user.email ?? undefined,
                 displayName: existing.user.user_metadata?.full_name ?? undefined,
             };
@@ -217,6 +264,7 @@ export async function initAuth(): Promise<AuthState> {
         const next: AuthState = {
             mode: "cloud",
             userId: session.user.id,
+            accessToken: session.access_token,
             email: session.user.email ?? undefined,
             displayName: session.user.user_metadata?.full_name ?? undefined,
         };
@@ -227,11 +275,21 @@ export async function initAuth(): Promise<AuthState> {
     }
 
     // 3. Fall back to local anonymous
-    const anonId = await getOrCreateLocalAnonId();
+    let anonId = "";
+    let accessToken: string | undefined;
+    try {
+        const anon = await getOrCreateBackendAnonymousSession();
+        anonId = anon.user_id;
+        accessToken = anon.access_token;
+    } catch (e) {
+        console.debug("[Auth] Backend anonymous session failed:", e);
+        anonId = await getOrCreateLocalAnonId();
+    }
     console.debug("[Auth] Using local_anon mode with ID:", anonId);
     const next: AuthState = {
         mode: "local_anon",
         userId: anonId,
+        accessToken,
     };
     setState(next);
     return next;
@@ -266,6 +324,7 @@ export async function signInInteractive(): Promise<AuthState> {
     const next: AuthState = {
         mode: "cloud",
         userId: session.user.id,
+        accessToken: session.access_token,
         email: session.user.email ?? undefined,
         displayName: session.user.user_metadata?.full_name ?? undefined,
     };
@@ -283,11 +342,21 @@ export async function signOut(): Promise<AuthState> {
     // Revoke Google token (best effort)
     // specific revocation endpoint for ID tokens isn't standard, but we clear session
 
-    const anonId = await getOrCreateLocalAnonId();
+    let anonId = "";
+    let accessToken: string | undefined;
+    try {
+        const anon = await getOrCreateBackendAnonymousSession();
+        anonId = anon.user_id;
+        accessToken = anon.access_token;
+    } catch (e) {
+        console.debug("[Auth] Backend anonymous session failed after sign-out:", e);
+        anonId = await getOrCreateLocalAnonId();
+    }
     console.debug("[Auth] Signed out, mode=local_anon");
     const next: AuthState = {
         mode: "local_anon",
         userId: anonId,
+        accessToken,
     };
     setState(next);
     return next;
@@ -306,6 +375,10 @@ export function getAuthState(): AuthState {
  */
 export function resolveUserId(): string {
     return currentState.userId;
+}
+
+export function getAuthAccessToken(): string | undefined {
+    return currentState.accessToken;
 }
 
 /**

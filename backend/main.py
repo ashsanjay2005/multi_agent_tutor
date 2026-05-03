@@ -8,14 +8,20 @@ import uuid
 from typing import Literal, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator
 import base64
 
 from config import settings
-from graph import get_graph
+from graph import (
+    get_graph,
+    teaching_architect_node,
+    step_solver_node,
+    parallel_teaching_nodes,
+    assembler_node,
+)
 from state import GraphState
 from rate_limiter import (
     init_rate_limiter, 
@@ -26,6 +32,13 @@ from rate_limiter import (
 from cache import init_video_cache, get_video_cache
 from youtube_resources_graph import get_youtube_graph, YouTubeResourcesState
 from backboard_client import get_backboard_service, is_backboard_available
+from auth_context import (
+    AuthContext,
+    create_anonymous_token,
+    require_auth_context,
+    require_cloud_user,
+    require_matching_user,
+)
 import supabase_client
 
 # Configure logging
@@ -35,6 +48,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+MAX_TEXT_CONTENT_CHARS = 20_000
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
 # ============================================================================
 # PYDANTIC MODELS
 # ============================================================================
@@ -42,17 +58,28 @@ logger = logging.getLogger(__name__)
 class AnalyzeRequest(BaseModel):
     type: Literal["text", "image"] = Field(...)
     content: str = Field(..., min_length=1)
-    user_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: Optional[str] = None
     thread_id: Optional[str] = Field(None)
     
     @validator("content")
     def validate_content(cls, v, values):
         if values.get("type") == "image":
             try:
-                base64.b64decode(v, validate=True)
+                decoded = base64.b64decode(v, validate=True)
             except Exception:
                 raise ValueError("Invalid base64 encoding")
+            if len(decoded) > MAX_IMAGE_BYTES:
+                raise ValueError("Image too large. Maximum size is 10MB.")
+        elif len(v) > MAX_TEXT_CONTENT_CHARS:
+            raise ValueError("Text input too large. Maximum length is 20,000 characters.")
         return v
+
+
+class AnonymousSessionResponse(BaseModel):
+    user_id: str
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: int
 
 class ResumeRequest(BaseModel):
     thread_id: str = Field(...)
@@ -146,7 +173,7 @@ class ResourcesResponse(BaseModel):
 # Student Profiling models (Backboard diagnostic logging)
 class LogBreakdownRequest(BaseModel):
     """Request to log when a student clicks 'breakdown' on a step."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     step_title: str = Field(..., description="Title of the step being broken down")
     concept: str = Field(..., description="Normalized concept tag (e.g., 'negative_signs', 'matrix_multiplication')")
     context: str = Field(..., description="Problem statement or step explanation")
@@ -154,7 +181,7 @@ class LogBreakdownRequest(BaseModel):
 
 class LogQuizResultRequest(BaseModel):
     """Request to log a quiz/practice result."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     concept: str = Field(..., description="Concept being tested (e.g., 'cross_product')")
     correct: bool = Field(..., description="Whether the answer was correct")
     question_summary: str = Field(..., description="Brief summary of the question")
@@ -162,14 +189,14 @@ class LogQuizResultRequest(BaseModel):
 
 class SyncFolderRequest(BaseModel):
     """Request to sync folder definition to Backboard memory."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     folder_id: str = Field(..., description="Unique folder identifier")
     folder_name: str = Field(..., description="Current folder name")
 
 
 class SuggestFolderRequest(BaseModel):
     """Request to get semantic folder suggestion for a problem."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     session_id: str = Field(..., description="Current session/problem ID")
     topic: str = Field(..., description="Problem topic")
     problem_text: str = Field(..., description="Problem text for semantic matching")
@@ -187,19 +214,19 @@ class FolderSuggestionResponse(BaseModel):
 
 class DeleteFolderRequest(BaseModel):
     """Request to delete folder from Backboard memory."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     folder_id: str = Field(..., description="Folder ID to delete")
 
 
 class DeleteProblemRequest(BaseModel):
     """Request to delete problem from Backboard memory."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     session_id: str = Field(..., description="Session/problem ID to delete")
 
 
 class SimilarProblemsRequest(BaseModel):
     """Request to find semantically similar problems."""
-    user_id: str = Field(..., description="User ID for thread lookup")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     topic: str = Field(..., description="Current problem topic")
     problem_text: str = Field(..., description="Current problem text")
 
@@ -314,13 +341,27 @@ app.add_middleware(
 async def health_check():
     return HealthResponse(status="healthy", environment=settings.environment)
 
+@app.post("/v1/anonymous_session", response_model=AnonymousSessionResponse)
+async def create_anonymous_session():
+    """Issue a backend-signed anonymous identity for local extension mode."""
+    user_id, token, expires_at = create_anonymous_token()
+    return AnonymousSessionResponse(
+        user_id=user_id,
+        access_token=token,
+        expires_at=expires_at,
+    )
+
 @app.get("/v1/quota")
-async def get_quota(user_id: str = "anonymous"):
+async def get_quota(
+    user_id: Optional[str] = None,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """Get current rate limit quota status for a user."""
+    resolved_user_id = require_matching_user(auth, user_id)
     try:
         limiter = await get_rate_limiter()
         user_tier = "free"  # In production, look up from DB
-        quota = await limiter.get_quota_status(user_id, tier=user_tier)
+        quota = await limiter.get_quota_status(resolved_user_id, tier=user_tier)
         return quota
     except RuntimeError:
         # Rate limiter not available
@@ -334,8 +375,12 @@ async def get_quota(user_id: str = "anonymous"):
         }
 
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
-async def analyze_problem(request: AnalyzeRequest):
+async def analyze_problem(
+    request: AnalyzeRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     global app_graph, app_graph_ckpt, _db_pool
+    user_id = require_matching_user(auth, request.user_id)
     
     # Lazy init: if graph failed during startup, retry now
     if app_graph is None:
@@ -346,6 +391,8 @@ async def analyze_problem(request: AnalyzeRequest):
         except Exception as e:
             logger.error(f"Lazy graph initialization failed: {e}")
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Database unavailable: {e}")
+    if app_graph_ckpt is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Checkpointed graph unavailable")
     
     # Check rate limit
     try:
@@ -353,7 +400,7 @@ async def analyze_problem(request: AnalyzeRequest):
         # Default to free tier - in production, you'd look up user tier from DB
         user_tier = "free"  
         allowed, remaining, reset_in = await limiter.check_rate_limit(
-            request.user_id, 
+            user_id,
             tier=user_tier
         )
         if not allowed:
@@ -378,10 +425,10 @@ async def analyze_problem(request: AnalyzeRequest):
     try:
         # Get or create Backboard thread for persistent memory
         backboard_thread_id = None
-        if is_backboard_available():
+        if auth.is_cloud and is_backboard_available():
             try:
                 backboard = await get_backboard_service()
-                backboard_thread_id = await backboard.get_or_create_thread(request.user_id)
+                backboard_thread_id = await backboard.get_or_create_thread(user_id)
             except Exception as e:
                 logger.warning(f"Backboard thread creation failed: {e}")
         
@@ -390,7 +437,7 @@ async def analyze_problem(request: AnalyzeRequest):
         if request.type == "image":
             try:
                 image_url = await supabase_client.upload_image(
-                    request.content, thread_id
+                    request.content, thread_id, user_id=user_id
                 )
                 content_for_state = image_url
                 logger.info(f"[Analyze] Image offloaded to storage: {image_url[:80]}...")
@@ -400,7 +447,7 @@ async def analyze_problem(request: AnalyzeRequest):
         initial_state: GraphState = {
             "input_type": request.type,
             "input_content": content_for_state,
-            "user_id": request.user_id,
+            "user_id": user_id,
             "thread_id": thread_id,
             "backboard_thread_id": backboard_thread_id,
             "topic": None,
@@ -416,64 +463,66 @@ async def analyze_problem(request: AnalyzeRequest):
             "requires_user_action": False
         }
         
-        # Use lightweight (non-checkpointed) graph by default — zero checkpoint overhead
-        result = await app_graph.ainvoke(initial_state)
+        # Use checkpointed graph so human-in-the-loop disambiguation can resume.
+        config = {"configurable": {"thread_id": thread_id}}
+        result = await app_graph_ckpt.ainvoke(initial_state, config)
         
         response_status = "completed"
         if result["requires_user_action"]:
             response_status = "requires_disambiguation" if result.get("candidate_topics") else "requires_clarification"
         
-        # Persist session + messages to Supabase (fire-and-forget, non-blocking)
-        try:
-            session = await supabase_client.create_session(
-                user_id=request.user_id,
-                title=result.get("input_content", "")[:100],
-                topic=result.get("topic", ""),
-                model=settings.text_model,
-                langgraph_thread_id=thread_id,
-            )
-            session_id = session["id"]
-            
-            # Save user message
-            await supabase_client.save_message(
-                session_id=session_id,
-                user_id=request.user_id,
-                role="user",
-                content_text=request.content[:500] if request.type == "text" else "[image]",
-            )
-            
-            # Save assistant response
-            await supabase_client.save_message(
-                session_id=session_id,
-                user_id=request.user_id,
-                role="assistant",
-                content_text=result.get("worked_example", "")[:500],
-                content_json={
-                    "solution_steps": result.get("solution_steps"),
-                    "final_answer": result.get("worked_example"),
-                    "topic": result.get("topic"),
-                    "confidence": result.get("confidence_score"),
-                },
-            )
-            # Save to saved_problems table
-            await supabase_client.save_problem(
-                user_id=request.user_id,
-                problem_text=(
-                    request.content[:500]
-                    if request.type == "text"
-                    else result.get("topic", "image problem")
-                ),
-                topic=result.get("topic", ""),
-                solution_summary=result.get("worked_example", "")[:500],
-                solution_json={
-                    "solution_steps": result.get("solution_steps"),
-                    "final_answer": result.get("worked_example"),
-                },
-                source=request.type,
-            )
-            logger.info(f"[Analyze] Persisted session {session_id} + problem to Supabase")
-        except Exception as e:
-            logger.warning(f"[Analyze] Supabase persistence failed (non-critical): {e}")
+        # Persist session + messages to Supabase only for verified cloud users.
+        if auth.is_cloud:
+            try:
+                session = await supabase_client.create_session(
+                    user_id=user_id,
+                    title=result.get("input_content", "")[:100],
+                    topic=result.get("topic", ""),
+                    model=settings.text_model,
+                    langgraph_thread_id=thread_id,
+                )
+                session_id = session["id"]
+
+                # Save user message
+                await supabase_client.save_message(
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="user",
+                    content_text=request.content[:500] if request.type == "text" else "[image]",
+                )
+
+                # Save assistant response
+                await supabase_client.save_message(
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="assistant",
+                    content_text=result.get("worked_example", "")[:500],
+                    content_json={
+                        "solution_steps": result.get("solution_steps"),
+                        "final_answer": result.get("worked_example"),
+                        "topic": result.get("topic"),
+                        "confidence": result.get("confidence_score"),
+                    },
+                )
+                # Save to saved_problems table
+                await supabase_client.save_problem(
+                    user_id=user_id,
+                    problem_text=(
+                        request.content[:500]
+                        if request.type == "text"
+                        else result.get("topic", "image problem")
+                    ),
+                    topic=result.get("topic", ""),
+                    solution_summary=result.get("worked_example", "")[:500],
+                    solution_json={
+                        "solution_steps": result.get("solution_steps"),
+                        "final_answer": result.get("worked_example"),
+                    },
+                    source=request.type,
+                )
+                logger.info(f"[Analyze] Persisted session {session_id} + problem to Supabase")
+            except Exception as e:
+                logger.warning(f"[Analyze] Supabase persistence failed (non-critical): {e}")
         
         return AnalyzeResponse(
             thread_id=thread_id,
@@ -492,7 +541,10 @@ async def analyze_problem(request: AnalyzeRequest):
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
 
 @app.post("/v1/resume", response_model=AnalyzeResponse)
-async def resume_workflow(request: ResumeRequest):
+async def resume_workflow(
+    request: ResumeRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     global app_graph_ckpt
     if app_graph_ckpt is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Graph not initialized")
@@ -504,33 +556,52 @@ async def resume_workflow(request: ResumeRequest):
         if not state:
              raise HTTPException(status.HTTP_404_NOT_FOUND, "Thread not found")
 
+        base_state = getattr(state, "values", state)
+        if not base_state:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Thread not found")
+        if base_state.get("user_id") != auth.user_id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Thread does not belong to user")
+
         # Resume by updating topic and proceeding
         updated_state = {
+            **base_state,
             "topic": request.selected_topic,
             "confidence_score": 1.0,
             "detected_ambiguity": False,
-            "requires_user_action": False
+            "candidate_topics": [],
+            "requires_user_action": False,
         }
         
-        # In v0.2, we update state and create a new run
-        await app_graph_ckpt.aupdate_state(config, updated_state)
-        # Invoke with None input to resume execution from current state
-        final_state = await app_graph_ckpt.ainvoke(None, config)
+        # The disambiguation node is terminal. Continue with the teaching
+        # pipeline explicitly after the user selects the intended topic.
+        teaching_state = await teaching_architect_node(updated_state)
+        solved_state = await step_solver_node(teaching_state)
+        parallel_state = await parallel_teaching_nodes(solved_state)
+        final_state = await assembler_node(parallel_state)
+        await app_graph_ckpt.aupdate_state(config, final_state)
         
         return AnalyzeResponse(
             thread_id=request.thread_id,
             status="completed",
             requires_user_action=False,
-            final_response_html=final_state["final_response_html"],
-            topic=final_state["topic"],
-            confidence_score=final_state["confidence_score"]
+            final_response_html=final_state.get("final_response_html"),
+            topic=final_state.get("topic"),
+            confidence_score=final_state.get("confidence_score"),
+            solution_steps=final_state.get("solution_steps"),
+            final_answer=final_state.get("worked_example"),
+            extracted_problem=final_state.get("input_content"),
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[Resume] Error: {e}", exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
 
 @app.post("/v1/expand_step", response_model=ExpandStepResponse)
-async def expand_step(request: ExpandStepRequest):
+async def expand_step(
+    request: ExpandStepRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Break down a solution step into 2-4 sub-steps.
     Uses parent step as context, doesn't restate the full problem.
@@ -721,7 +792,7 @@ class PracticeRequest(BaseModel):
     topic: str = Field(..., description="The topic to generate practice problems for")
     original_problem: str = Field(..., description="The original problem for context")
     num_questions: int = Field(default=3, ge=1, le=5)
-    user_id: str = Field(default="anonymous", description="User ID for profile-aware generation")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
 
 
 class PracticeQuestion(BaseModel):
@@ -739,8 +810,12 @@ class PracticeResponse(BaseModel):
 
 
 @app.post("/v1/practice", response_model=PracticeResponse)
-async def generate_practice(request: PracticeRequest):
+async def generate_practice(
+    request: PracticeRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """Generate practice problems on-demand, adapted to student's profile."""
+    user_id = require_matching_user(auth, request.user_id)
     logger.info(f"[Practice] Generating {request.num_questions} questions for: {request.topic}")
     
     from langchain_google_genai import ChatGoogleGenerativeAI
@@ -756,11 +831,11 @@ async def generate_practice(request: PracticeRequest):
     
     # Get student profile for adaptive question generation
     profile_context = ""
-    if is_backboard_available():
+    if auth.is_cloud and is_backboard_available():
         try:
             from backboard_client import get_backboard_service
             backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(request.user_id or "anonymous")
+            thread_id = await backboard.get_or_create_thread(user_id)
             profile = await backboard.get_student_profile(thread_id, request.topic)
             
             if profile.has_history:
@@ -837,7 +912,10 @@ Make the questions progressively harder. Use LaTeX for math expressions."""
 # ============================================================================
 
 @app.post("/v1/resources", response_model=ResourcesResponse)
-async def get_youtube_resources(request: ResourcesRequest):
+async def get_youtube_resources(
+    request: ResourcesRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Get YouTube video resources for a math problem.
     Uses caching to avoid re-fetching for the same problem+offset.
@@ -858,11 +936,11 @@ async def get_youtube_resources(request: ResourcesRequest):
     
     # 2. Get student profile for Gap-Fill video queries
     student_weakness = None
-    if is_backboard_available() and hasattr(request, 'user_id') and request.user_id:
+    if auth.is_cloud and is_backboard_available():
         try:
             from backboard_client import get_backboard_service
             backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(request.user_id)
+            thread_id = await backboard.get_or_create_thread(auth.user_id)
             profile = await backboard.get_student_profile(thread_id, request.topic)
             
             if profile.weak_concepts:
@@ -927,19 +1005,23 @@ async def get_youtube_resources(request: ResourcesRequest):
 # ============================================================================
 
 @app.post("/v1/log_breakdown", status_code=status.HTTP_200_OK)
-async def log_breakdown(request: LogBreakdownRequest):
+async def log_breakdown(
+    request: LogBreakdownRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Log when a student clicks 'breakdown' on a step.
     This shadow-saves the interaction to Backboard for profiling.
     """
-    logger.info(f"[LogBreakdown] user={request.user_id}, concept={request.concept}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[LogBreakdown] user={user_id}, concept={request.concept}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return {"status": "skipped", "message": "Backboard not configured"}
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         await backboard.log_struggle(
             thread_id=thread_id,
@@ -957,19 +1039,23 @@ async def log_breakdown(request: LogBreakdownRequest):
 
 
 @app.post("/v1/log_quiz_result", status_code=status.HTTP_200_OK)
-async def log_quiz_result(request: LogQuizResultRequest):
+async def log_quiz_result(
+    request: LogQuizResultRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Log quiz/practice results for student profiling.
     Tracks mastery and struggle patterns.
     """
-    logger.info(f"[LogQuizResult] user={request.user_id}, concept={request.concept}, correct={request.correct}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[LogQuizResult] user={user_id}, concept={request.concept}, correct={request.correct}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return {"status": "skipped", "message": "Backboard not configured"}
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         await backboard.log_quiz_result(
             thread_id=thread_id,
@@ -987,19 +1073,23 @@ async def log_quiz_result(request: LogQuizResultRequest):
 
 
 @app.post("/v1/similar_problems", response_model=SimilarProblemsResponse)
-async def find_similar_problems_endpoint(request: SimilarProblemsRequest):
+async def find_similar_problems_endpoint(
+    request: SimilarProblemsRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Find semantically similar problems from Backboard memory.
     Used for smart grouping suggestions in history view.
     """
-    logger.info(f"[SimilarProblems] user={request.user_id}, topic={request.topic}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[SimilarProblems] user={user_id}, topic={request.topic}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return SimilarProblemsResponse(similar_problems=[], suggested_folder_name=None)
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         similar = await backboard.find_similar_problems(
             thread_id=thread_id,
@@ -1035,19 +1125,23 @@ async def find_similar_problems_endpoint(request: SimilarProblemsRequest):
 # ============================================================================
 
 @app.post("/v1/sync_folder", status_code=status.HTTP_200_OK)
-async def sync_folder(request: SyncFolderRequest):
+async def sync_folder(
+    request: SyncFolderRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Sync folder definition to Backboard memory.
     Called when folder is created or renamed to keep Folder Map updated.
     """
-    logger.info(f"[SyncFolder] user={request.user_id}, folder={request.folder_id} -> {request.folder_name}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[SyncFolder] user={user_id}, folder={request.folder_id} -> {request.folder_name}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return {"status": "skipped", "message": "Backboard not configured"}
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         await backboard.save_folder_definition(
             thread_id=thread_id,
@@ -1063,19 +1157,23 @@ async def sync_folder(request: SyncFolderRequest):
 
 
 @app.post("/v1/suggest_folder", response_model=FolderSuggestionResponse)
-async def suggest_folder(request: SuggestFolderRequest):
+async def suggest_folder(
+    request: SuggestFolderRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Get semantic folder suggestion for a problem.
     Uses Backboard memory search with 0.85 similarity threshold.
     """
-    logger.info(f"[SuggestFolder] user={request.user_id}, topic={request.topic}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[SuggestFolder] user={user_id}, topic={request.topic}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return FolderSuggestionResponse(action="no_suggestion")
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         suggestion = await backboard.find_folder_for_problem(
             thread_id=thread_id,
@@ -1098,19 +1196,23 @@ async def suggest_folder(request: SuggestFolderRequest):
 
 
 @app.post("/v1/delete_folder", status_code=status.HTTP_200_OK)
-async def delete_folder_memory(request: DeleteFolderRequest):
+async def delete_folder_memory(
+    request: DeleteFolderRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Delete folder definition from Backboard memory.
     Called when folder is deleted to prevent stale suggestions.
     """
-    logger.info(f"[DeleteFolder] user={request.user_id}, folder={request.folder_id}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[DeleteFolder] user={user_id}, folder={request.folder_id}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return {"status": "skipped", "message": "Backboard not configured"}
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         await backboard.delete_folder_definition(
             thread_id=thread_id,
@@ -1125,19 +1227,23 @@ async def delete_folder_memory(request: DeleteFolderRequest):
 
 
 @app.post("/v1/delete_problem", status_code=status.HTTP_200_OK)
-async def delete_problem_memory(request: DeleteProblemRequest):
+async def delete_problem_memory(
+    request: DeleteProblemRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Delete problem from Backboard memory.
     Called when problem is deleted to exclude from similarity searches.
     """
-    logger.info(f"[DeleteProblem] user={request.user_id}, session={request.session_id}")
+    user_id = require_matching_user(auth, request.user_id)
+    logger.info(f"[DeleteProblem] user={user_id}, session={request.session_id}")
     
-    if not is_backboard_available():
+    if not auth.is_cloud or not is_backboard_available():
         return {"status": "skipped", "message": "Backboard not configured"}
     
     try:
         backboard = await get_backboard_service()
-        thread_id = await backboard.get_or_create_thread(request.user_id)
+        thread_id = await backboard.get_or_create_thread(user_id)
         
         await backboard.delete_problem_memory(
             thread_id=thread_id,
@@ -1170,7 +1276,7 @@ class SessionMessagesResponse(BaseModel):
 
 class FeedbackRequest(BaseModel):
     """User feedback on a session or message."""
-    user_id: str = Field(...)
+    user_id: Optional[str] = None
     rating: int = Field(..., ge=1, le=5)
     session_id: Optional[str] = None
     message_id: Optional[str] = None
@@ -1179,14 +1285,17 @@ class FeedbackRequest(BaseModel):
 
 @app.get("/v1/sessions", response_model=list[SessionListItem])
 async def list_sessions(
-    user_id: str,
+    user_id: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
     include_archived: bool = False,
+    auth: AuthContext = Depends(require_auth_context),
 ):
     """Get paginated session list for a user."""
+    resolved_user_id = require_matching_user(auth, user_id)
+    require_cloud_user(auth)
     sessions = await supabase_client.get_user_sessions(
-        user_id=user_id,
+        user_id=resolved_user_id,
         limit=limit,
         offset=offset,
         include_archived=include_archived,
@@ -1195,20 +1304,31 @@ async def list_sessions(
 
 
 @app.get("/v1/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
-async def get_session_messages(session_id: str, user_id: str):
+async def get_session_messages(
+    session_id: str,
+    user_id: Optional[str] = None,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """Get all messages for a session."""
+    resolved_user_id = require_matching_user(auth, user_id)
+    require_cloud_user(auth)
     messages = await supabase_client.get_session_messages(
         session_id=session_id,
-        user_id=user_id,
+        user_id=resolved_user_id,
     )
     return SessionMessagesResponse(session_id=session_id, messages=messages)
 
 
 @app.post("/v1/feedback", status_code=status.HTTP_201_CREATED)
-async def submit_feedback(request: FeedbackRequest):
+async def submit_feedback(
+    request: FeedbackRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """Submit user feedback on a session or message."""
+    user_id = require_matching_user(auth, request.user_id)
+    require_cloud_user(auth)
     result = await supabase_client.save_feedback(
-        user_id=request.user_id,
+        user_id=user_id,
         rating=request.rating,
         session_id=request.session_id,
         message_id=request.message_id,
@@ -1230,7 +1350,7 @@ class CheatSheetProblem(BaseModel):
 
 class GenerateCheatSheetRequest(BaseModel):
     """Request to generate a cheat sheet and write it to Google Docs."""
-    user_id: str = Field(..., description="User ID for Supabase/Backboard queries")
+    user_id: Optional[str] = Field(None, description="Deprecated; derived from Authorization")
     folder_name: str = Field(..., description="Folder display name")
     problems: list[CheatSheetProblem] = Field(..., description="Problems from the folder")
     google_access_token: str = Field(..., description="OAuth access token for Google Docs API")
@@ -1384,7 +1504,10 @@ def _markdown_to_docs_requests(markdown_text: str) -> list[dict]:
 
 
 @app.post("/v1/generate_cheatsheet", response_model=GenerateCheatSheetResponse)
-async def generate_cheatsheet(request: GenerateCheatSheetRequest):
+async def generate_cheatsheet(
+    request: GenerateCheatSheetRequest,
+    auth: AuthContext = Depends(require_auth_context),
+):
     """
     Generate a cheat sheet from folder data and write it to Google Docs.
 
@@ -1402,8 +1525,9 @@ async def generate_cheatsheet(request: GenerateCheatSheetRequest):
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_core.messages import HumanMessage
 
+    user_id = require_matching_user(auth, request.user_id)
     logger.info(f"[CheatSheet] Generating for folder '{request.folder_name}', "
-                f"user={request.user_id}, problems={len(request.problems)}")
+                f"user={user_id}, problems={len(request.problems)}")
 
     if not request.problems:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No problems provided")
@@ -1420,10 +1544,10 @@ async def generate_cheatsheet(request: GenerateCheatSheetRequest):
         topic_counts[p.topic] = topic_counts.get(p.topic, 0) + 1
     primary_topic = max(topic_counts, key=topic_counts.get) if topic_counts else request.folder_name
 
-    if is_backboard_available():
+    if auth.is_cloud and is_backboard_available():
         try:
             backboard = await get_backboard_service()
-            thread_id = await backboard.get_or_create_thread(request.user_id)
+            thread_id = await backboard.get_or_create_thread(user_id)
 
             # Get student profile for strengths/weaknesses
             profile = await backboard.get_student_profile(thread_id, primary_topic)
@@ -1516,7 +1640,7 @@ RULES:
 1. Use Markdown headings (## for sections, ### for subsections)
 2. Use **bold** for key terms
 3. Use bullet points for lists
-4. VERY IMPORTANT: Do NOT use raw LaTeX (like \lambda, \frac, or \begin{{bmatrix}}). Instead, use plain text with Unicode math symbols (e.g., λ, x², 1/2). Format matrices simply like [[1, 2], [3, 4]].
+4. VERY IMPORTANT: Do NOT use raw LaTeX (like \\lambda, \\frac, or \\begin{{bmatrix}}). Instead, use plain text with Unicode math symbols (e.g., λ, x², 1/2). Format matrices simply like [[1, 2], [3, 4]].
 5. Keep it concise — this is a CHEAT SHEET, not a textbook
 6. Focus on the specific topics from the problems above
 7. Make it immediately useful for exam preparation"""

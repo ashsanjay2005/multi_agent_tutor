@@ -331,13 +331,12 @@ async def ensure_storage_bucket() -> None:
     client = get_supabase()
     try:
         client.storage.get_bucket(STORAGE_BUCKET)
-        logger.debug(f"Storage bucket '{STORAGE_BUCKET}' already exists")
     except Exception:
         try:
             client.storage.create_bucket(
                 STORAGE_BUCKET,
                 options={
-                    "public": True,
+                    "public": False,
                     "file_size_limit": 10 * 1024 * 1024,  # 10MB
                     "allowed_mime_types": ["image/png", "image/jpeg", "image/webp"],
                 },
@@ -349,25 +348,44 @@ async def ensure_storage_bucket() -> None:
                 logger.debug(f"Bucket '{STORAGE_BUCKET}' already exists (race)")
             else:
                 raise
+        return
+
+    client.storage.update_bucket(
+        STORAGE_BUCKET,
+        options={
+            "public": False,
+            "file_size_limit": 10 * 1024 * 1024,
+            "allowed_mime_types": ["image/png", "image/jpeg", "image/webp"],
+        },
+    )
+    logger.debug(f"Storage bucket '{STORAGE_BUCKET}' already exists")
 
 
-async def upload_image(base64_data: str, thread_id: str) -> str:
+async def upload_image(base64_data: str, thread_id: str, user_id: str | None = None) -> str:
     """Upload a base64-encoded image to Supabase Storage.
 
-    Returns the public URL of the uploaded image.
+    Returns a short-lived signed URL for model processing.
     """
     import base64 as b64
 
+    await ensure_storage_bucket()
     client = get_supabase()
     image_bytes = b64.b64decode(base64_data)
 
     # Determine content type from magic bytes
     content_type = "image/png"
+    ext = "png"
     if image_bytes[:2] == b"\xff\xd8":
         content_type = "image/jpeg"
+        ext = "jpg"
+    elif image_bytes[:4] == b"RIFF" and image_bytes[8:12] == b"WEBP":
+        content_type = "image/webp"
+        ext = "webp"
+    elif not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Unsupported image format")
 
-    ext = "png" if content_type == "image/png" else "jpg"
-    path = f"{thread_id}.{ext}"
+    owner = user_id if user_id and _is_valid_uuid(user_id) else "anonymous"
+    path = f"{owner}/{thread_id}-{_uuid_mod.uuid4().hex}.{ext}"
 
     client.storage.from_(STORAGE_BUCKET).upload(
         path,
@@ -375,13 +393,25 @@ async def upload_image(base64_data: str, thread_id: str) -> str:
         file_options={"content-type": content_type, "upsert": "true"},
     )
 
-    public_url = client.storage.from_(STORAGE_BUCKET).get_public_url(path)
+    signed = client.storage.from_(STORAGE_BUCKET).create_signed_url(path, 60 * 60)
+    if isinstance(signed, str):
+        signed_url = signed
+    elif isinstance(signed, dict):
+        signed_url = (
+            signed.get("signedURL")
+            or signed.get("signedUrl")
+            or signed.get("signed_url")
+        )
+    else:
+        signed_url = getattr(signed, "signed_url", None)
+    if not signed_url:
+        raise RuntimeError("Supabase did not return a signed image URL")
     logger.info(f"Uploaded image to storage: {path} ({len(image_bytes)} bytes)")
-    return public_url
+    return signed_url
 
 
 async def download_image_bytes(url: str) -> bytes:
-    """Download image bytes from a Supabase Storage public URL."""
+    """Download image bytes from a Supabase Storage signed URL."""
     import urllib.request
 
     with urllib.request.urlopen(url, timeout=30) as resp:

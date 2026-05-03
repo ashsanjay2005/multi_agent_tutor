@@ -68,6 +68,10 @@ function App() {
       setError('Please enter a math problem or capture a screenshot');
       return;
     }
+    if (!authState.accessToken) {
+      setError('Authentication is still initializing. Please try again in a moment.');
+      return;
+    }
 
     setState('loading');
     setError(null);
@@ -230,6 +234,19 @@ function App() {
 
       setResponse(result);
       setState('solution');
+
+      if (result.solution_steps && result.topic) {
+        const problemText = result.extracted_problem || originalProblem || selectedTopic;
+        const saved = await saveSession({
+          problem: problemText,
+          topic: result.topic,
+          solutionSteps: result.solution_steps as SolutionStep[],
+          finalAnswer: result.final_answer || '',
+        });
+        setCurrentSessionId(saved.id);
+        setOriginalProblem(problemText);
+        setHistorySessions(await getHistory());
+      }
     } catch (err) {
       setState('error');
       if (err instanceof APIError) {
@@ -883,5 +900,4 @@ Example: Solve for x: 2x + 5 = 13"
 }
 
 export default App;
-
 

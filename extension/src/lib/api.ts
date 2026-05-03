@@ -14,6 +14,7 @@ import type {
     ResourcesRequest,
     ResourcesResponse,
 } from './types';
+import { getAuthAccessToken } from './auth';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -47,14 +48,19 @@ async function fetchAPI<T>(
     options: RequestInit = {}
 ): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
+    const headers = new Headers(options.headers);
+    if (!headers.has('Content-Type')) {
+        headers.set('Content-Type', 'application/json');
+    }
+    const accessToken = getAuthAccessToken();
+    if (accessToken && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${accessToken}`);
+    }
 
     try {
         const response = await fetch(url, {
             ...options,
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers,
-            },
+            headers,
         });
 
         if (!response.ok) {
@@ -407,4 +413,3 @@ export async function generateCheatSheet(
         body: JSON.stringify(request),
     });
 }
-

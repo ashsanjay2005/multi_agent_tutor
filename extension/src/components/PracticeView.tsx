@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { CheckCircle2, XCircle, ChevronRight, ArrowLeft } from 'lucide-react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import DOMPurify from 'dompurify';
 import { logQuizResult } from '../lib/api';
 import { getUserId } from '../lib/utils';
 
@@ -23,6 +24,22 @@ interface PracticeViewProps {
 }
 
 // Render LaTeX in text
+function sanitizeHtml(html: string): string {
+    return DOMPurify.sanitize(html, {
+        USE_PROFILES: { html: true },
+        ADD_ATTR: ['class', 'style'],
+    });
+}
+
+function escapeHtml(text: string): string {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function renderLatex(text: string): string {
     if (!text) return '';
 
@@ -30,21 +47,21 @@ function renderLatex(text: string): string {
     let result = text.replace(/\$\$([^$]+)\$\$/g, (_, latex) => {
         try {
             return `<div style="margin: 8px 0; text-align: center;">${katex.renderToString(latex.trim(), { throwOnError: false, displayMode: true })}</div>`;
-        } catch { return `<code>${latex}</code>`; }
+        } catch { return `<code>${escapeHtml(latex)}</code>`; }
     });
 
     // Handle inline math $...$
     result = result.replace(/\$([^$]+)\$/g, (_, latex) => {
         try {
             return katex.renderToString(latex.trim(), { throwOnError: false, displayMode: false });
-        } catch { return `<code>${latex}</code>`; }
+        } catch { return `<code>${escapeHtml(latex)}</code>`; }
     });
 
     return result;
 }
 
 function TextWithMath({ text }: { text: string }) {
-    const html = useMemo(() => renderLatex(text), [text]);
+    const html = useMemo(() => sanitizeHtml(renderLatex(text)), [text]);
     return <span dangerouslySetInnerHTML={{ __html: html }} />;
 }
 

@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     rate_limit_free: int = 5   # requests per minute for free tier
     rate_limit_pro: int = 50   # requests per minute for pro tier
     rate_limit_window: int = 60  # window in seconds
+
+    # Backend-signed anonymous identities for local mode
+    anonymous_token_secret: str = ""
+    anonymous_token_ttl_seconds: int = 60 * 60 * 24 * 180  # 180 days
     
     # Confidence Thresholds (for routing logic)
     confidence_threshold_low: float = 0.4
@@ -64,4 +68,3 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
-
